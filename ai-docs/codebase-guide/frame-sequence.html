@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cocos Native · 单帧绘制时序图</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#e6edf3; --muted:#9aa7b4; --accent:#58a6ff; }
+  * { box-sizing: border-box; }
+  html,body { margin:0; padding:0; background:var(--bg); color:var(--text); font-family:-apple-system,"Segoe UI","Microsoft YaHei",Roboto,Helvetica,Arial,sans-serif; line-height:1.5; }
+  header { position:sticky; top:0; z-index:20; background:linear-gradient(180deg,#0d1117 0%,rgba(13,17,23,.92) 100%); backdrop-filter:blur(6px); border-bottom:1px solid var(--border); padding:14px 22px; }
+  header h1 { margin:0; font-size:18px; letter-spacing:.5px; }
+  header p { margin:4px 0 0; font-size:12.5px; color:var(--muted); }
+  .nav { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
+  .btn { cursor:pointer; border:1px solid var(--border); background:#1c2430; color:var(--text); padding:5px 12px; border-radius:6px; font-size:12.5px; text-decoration:none; }
+  .btn:hover { border-color:var(--accent); color:var(--accent); }
+  main { padding:18px 22px 80px; max-width:1200px; margin:0 auto; }
+  .diagram { background:var(--panel); border:1px solid var(--border); border-radius:9px; padding:14px 18px; margin:16px 0; overflow-x:auto; }
+  .diagram h2 { font-size:15px; margin:0 0 4px; }
+  .diagram .sub { font-size:12px; color:var(--muted); margin:0 0 10px; }
+  .hint { font-size:12px; color:var(--muted); }
+  footer { text-align:center; color:var(--muted); font-size:11.5px; padding:20px; }
+  a { color:var(--accent); }
+  code { font-family:"SFMono-Regular",Consolas,monospace; font-size:11.5px; background:#0b0f14; border:1px solid var(--border); padding:1px 6px; border-radius:5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Cocos Native · 单帧绘制时序图</h1>
+  <p>从 <code>Engine::tick</code> 到 <code>vkQueuePresentKHR</code> / <code>eglSwapBuffers</code> 的时序。需联网加载 Mermaid（CDN）；离线请改用 <code>frame-flow.html</code> 的自包含树状图。</p>
+  <div class="nav">
+    <a class="btn" href="frame-flow.html">▸ 调用链树状图</a>
+    <a class="btn" href="architecture.html">▸ 架构图</a>
+  </div>
+</header>
+<main>
+  <div class="diagram">
+    <h2>① 单帧主流程</h2>
+    <p class="sub">Engine → JS 帧逻辑 → Root::frameMove(Begin/Process/End) → ForwardPipeline → GFX 提交/呈现</p>
+    <div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant JS as JS/TS Logic
+    participant ENG as Engine
+    participant ROOT as Root
+    participant RW as RenderWindow
+    participant SC as RenderScene
+    participant FP as ForwardPipeline
+    participant CB as CommandBuffer
+    participant Q as Queue
+    participant DEV as Device
+
+    ENG->>JS: scheduler.update(dt)
+    Note over JS: 脚本帧逻辑，调用 root.frameMove
+    JS->>ROOT: frameMove(dt, totalFrames)
+    Note over ROOT: frameMoveBegin()
+    ROOT->>ROOT: removeBatches / _batcher->update / _cameraList.clear
+    Note over ROOT: frameMoveProcess()
+    ROOT->>RW: extractRenderCameras(_cameraList)
+    RW->>RW: camera->update() 重算视锥/VP 矩阵
+    ROOT->>DEV: acquire(swapchains)
+    DEV->>DEV: vkAcquireNextImageKHR (Vulkan)
+    ROOT->>SC: scene->update(stamp)
+    SC->>SC: 重算世界矩阵 / 光源 uniform
+    Note over ROOT: frameMoveEnd()
+    ROOT->>ROOT: stable_sort(_cameraList, priority)
+    ROOT->>FP: _pipelineRuntime->render(cameras)
+    FP->>CB: _commandBuffers[0]->begin()
+    FP->>FP: PipelineUBO.updateGlobalUBO / updateMultiCameraUBO
+    FP->>FP: validPunctualLightsCulling + sceneCulling
+    FP->>FP: ForwardStage::render -> RenderQueue 排序
+    FP->>CB: bindPipelineState / bindDescriptorSet(G/M/L) / bindInputAssembler / draw
+    FP->>CB: _commandBuffers[0]->end()
+    FP->>Q: getQueue()->submit
+    Q->>DEV: present()
+    DEV->>DEV: vkQueuePresentKHR (Vulkan) / eglSwapBuffers (GLES3)
+    </div>
+  </div>
+
+  <div class="diagram">
+    <h2>② 命令录制与 GPU 提交（装饰器链 → 双后端）</h2>
+    <p class="sub">主线程 CommandBufferAgent 入队 → 渲染线程执行 → Vulkan vk* / GLES3 gl*</p>
+    <div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant FP as ForwardPipeline
+    participant CBA as CommandBufferAgent
+    participant MQ as MessageQueue
+    participant RT as RenderThread
+    participant VK as CCVKCommandBuffer
+    participant GLES as GLES3PrimaryCB
+    participant VQ as VKQueue
+    participant GC as GLES3Queue
+
+    FP->>CBA: begin / beginRenderPass / bind* / draw / end
+    Note over CBA: 每个方法 ENQUEUE_MESSAGE 入队
+    CBA->>MQ: enqueue(lambda actor->xxx)
+    FP->>CBA: flushCommands()
+    CBA->>MQ: flushMessages() then kick
+    MQ->>RT: 渲染线程执行 actor->begin..draw..end
+    alt Vulkan 后端
+        RT->>VK: begin -> vkBeginCommandBuffer
+        RT->>VK: beginRenderPass -> vkCmdBeginRenderPass
+        RT->>VK: bindPipelineState -> vkCmdBindPipeline
+        RT->>VK: bind* -> vkCmdBindDescriptorSets / vkCmdBindVertexBuffers
+        RT->>VK: draw -> vkCmdDrawIndexed
+        RT->>VK: end -> vkEndCommandBuffer
+        RT->>VQ: submit -> vkQueueSubmit
+    else GLES3 后端
+        RT->>GLES: begin (重置状态机)
+        RT->>GLES: beginRenderPass -> glBindFramebuffer/glViewport/glClear
+        RT->>GLES: bind* (仅缓存)
+        RT->>GLES: draw -> bindStates -> glDrawElements
+        RT->>GLES: end (补发延迟 GL 状态)
+        RT->>GC: replay -> cmdFuncGLES3ExecuteCmds (gl* 同步发出)
+    end
+    </div>
+  </div>
+  <p class="hint">说明：基类 <code>gfx-base/GFXCommandBuffer</code> 仅实现 initialize/destroy，begin/end/draw/execute 为纯虚；Vulkan 后端直接调用 vk*（VKCommands.cpp 不含 cmdBegin/cmdBind* 包装，仅用于资源创建/拷贝）；GLES3 的 begin/end 不立即产生 gl*，真正 gl* 在 bindStates → cmdFuncGLES3BindState 中按序发出。坐标详见 <code>frame-flow.html</code>。</p>
+</main>
+<footer>配合 <code>codebase-guide/00-overview.md · core.md · renderer.md · application.md</code> 阅读</footer>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: 'dark', securityLevel: 'loose' });
+</script>
+</body>
+</html>

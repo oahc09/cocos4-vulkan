@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cocos Native · 单帧绘制流程（可展开）</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel2: #1c2430;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #9aa7b4;
+    --accent: #58a6ff;
+    --l0: #f778ba;
+    --l1: #ff9f43;
+    --l2: #ffd33d;
+    --l3: #7ee787;
+    --l4: #79c0ff;
+    --l5: #d2a8ff;
+    --code: #c9d1d9;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+  }
+  header {
+    position: sticky; top: 0; z-index: 20;
+    background: linear-gradient(180deg, #0d1117 0%, rgba(13,17,23,.92) 100%);
+    backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 22px;
+  }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: .5px; }
+  header p { margin: 4px 0 0; font-size: 12.5px; color: var(--muted); }
+  .toolbar { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .btn {
+    cursor: pointer; border: 1px solid var(--border); background: var(--panel2);
+    color: var(--text); padding: 5px 12px; border-radius: 6px; font-size: 12.5px;
+    transition: .15s; user-select: none;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; margin-left: auto; font-size: 11.5px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+
+  main { padding: 18px 22px 80px; max-width: 1200px; margin: 0 auto; }
+
+  .tree { --indent: 26px; }
+  .node { position: relative; }
+  .node-children {
+    margin-left: var(--indent);
+    padding-left: 16px;
+    border-left: 1px dashed var(--border);
+    overflow: hidden;
+    transition: max-height .28s ease;
+  }
+  .node-children.collapsed { display: none; }
+
+  .card {
+    display: flex; align-items: flex-start; gap: 10px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 9px 12px;
+    margin: 7px 0;
+    cursor: pointer;
+    transition: .15s;
+    position: relative;
+  }
+  .card:hover { border-color: var(--accent); background: var(--panel2); }
+  .card.leaf { cursor: default; }
+  .card.leaf:hover { border-color: var(--border); background: var(--panel); }
+
+  .toggle {
+    flex: 0 0 auto; width: 20px; height: 20px; border-radius: 5px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700; margin-top: 1px;
+    background: #21262d; color: var(--accent); border: 1px solid var(--border);
+    transition: transform .2s;
+  }
+  .card.leaf .toggle { visibility: hidden; }
+  .card.expanded .toggle { transform: rotate(90deg); }
+
+  .body { flex: 1 1 auto; min-width: 0; }
+  .title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .title { font-weight: 600; font-size: 14px; }
+  .tag {
+    font-size: 10.5px; padding: 1px 7px; border-radius: 10px;
+    background: #21262d; color: var(--muted); border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .code {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-size: 11.5px; color: var(--code);
+    background: #0b0f14; border: 1px solid var(--border);
+    padding: 1px 6px; border-radius: 5px;
+  }
+  .desc { font-size: 12.5px; color: var(--muted); margin-top: 4px; }
+  .file {
+    display: inline-block; margin-top: 5px; font-size: 11.5px;
+    color: var(--accent); text-decoration: none;
+    font-family: "SFMono-Regular", Consolas, monospace;
+  }
+  .file:hover { text-decoration: underline; }
+  .count { font-size: 10.5px; color: var(--muted); }
+
+  /* level accent bars */
+  .lvl0 > .card { border-left: 4px solid var(--l0); }
+  .lvl1 > .card { border-left: 4px solid var(--l1); }
+  .lvl2 > .card { border-left: 4px solid var(--l2); }
+  .lvl3 > .card { border-left: 4px solid var(--l3); }
+  .lvl4 > .card { border-left: 4px solid var(--l4); }
+  .lvl5 > .card { border-left: 4px solid var(--l5); }
+
+  footer { text-align: center; color: var(--muted); font-size: 11.5px; padding: 20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Cocos Native · 单帧绘制流程（追到根部调用链）</h1>
+  <p>从 <code class="code">Engine::tick()</code> 到 <code class="code">vkQueuePresentKHR</code> / <code class="code">eglSwapBuffers</code> 的一帧完整调用链路，每个节点都 drill 到真实函数与 <code class="code">file:line</code>。点击逐层展开。</p>
+  <div class="toolbar">
+    <div class="btn" id="expandAll">▸ 全部展开</div>
+    <div class="btn" id="collapseAll">▾ 全部折叠</div>
+    <div class="btn" id="expandTwo">展开到 2 层</div>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--l0)"></i>帧入口</span>
+      <span><i class="dot" style="background:var(--l1)"></i>阶段</span>
+      <span><i class="dot" style="background:var(--l2)"></i>子流程</span>
+      <span><i class="dot" style="background:var(--l3)"></i>步骤</span>
+      <span><i class="dot" style="background:var(--l4)"></i>细节</span>
+      <span><i class="dot" style="background:var(--l5)"></i>代码</span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="tree" id="tree"></div>
+</main>
+
+<footer>基于 <code class="code">native/cocos</code> 源码梳理（含 file:line）· 配合 <code class="code">codebase-guide/00-overview.md · core.md · renderer.md · application.md</code> 阅读</footer>
+
+<script>
+const ROOT = "file:///e:/AIProMax/github/cocos4-vulkan/native/cocos/";
+
+// 单帧绘制流程数据树（node: {t 标题, tag 标签, code 代码符号, d 描述, f 文件相对路径, c 子节点}）
+// 各节点 drill 到根部真实函数调用（file:line 取自 native/cocos 源码），与 core.md「每帧流程」、renderer.md「管线/GFX/装饰器」、application.md「时序图」对齐。
+const DATA = {
+  t: "单帧绘制流程 (One Frame)",
+  tag: "帧循环",
+  code: "CocosApplication::run / Engine::tick",
+  d: "主循环每帧调用一次。宏观分五段：帧入口 (Engine::tick) → 场景/渲染驱动 (Root::frameMove) → 管线执行 (RenderPipeline::render) → GFX 提交 (CommandBuffer 录制 → draw) → 提交与呈现 (Queue::submit / Swapchain::present)。每一层都 drill 到真实函数调用。",
+  f: "engine/Engine.cpp",
+  c: [
+    {
+      t: "① Engine::tick() 帧入口",
+      tag: "阶段", code: "Engine::tick(deltaTime)", f: "engine/Engine.cpp",
+      d: "平台主循环反复调用。顺序：frameSync → 帧率限制 → 事件广播 → 调度器更新（驱动 JS 逻辑帧）→ 延迟释放 → 跨线程任务。XR 下由 beginRenderFrame/endRenderFrame 包裹整段。",
+      c: [
+        {
+          t: "Engine::run 提交 tick 到平台线程", tag: "子流程", code: "platform->runInPlatformThread([&]{ tick(); })", f: "engine/Engine.cpp",
+          d: "Engine::run 把 tick 的 lambda 投递到平台线程反复执行（Engine.cpp:233）。",
+          c: [
+            { t: "Engine::tick 帧主体", tag: "代码", code: "Engine::tick()", f: "engine/Engine.cpp", d: "Engine.cpp:280 起，逐行执行下列调用。" }
+          ]
+        },
+        {
+          t: "帧同步 frameSync", tag: "子流程", code: "_gfxDevice->frameSync()", f: "engine/Engine.cpp",
+          d: "确保 CPU 领先 GPU 不超过设定帧数。",
+          c: [
+            { t: "→ CCVKDevice::frameSync()", tag: "代码", code: "CCVKDevice::frameSync", f: "renderer/gfx-vulkan/VKDevice.cpp", d: "Engine.cpp:285 直接调到真实后端（装饰器最内层）；排空上一帧已提交的命令。" }
+          ]
+        },
+        {
+          t: "帧率限制 / FPS sleep", tag: "子流程", code: "_preferredNanosecondsPerFrame",
+          d: "按目标 FPS 休眠（NANOSECONDS_60FPS = 16666667L），避免空转。",
+          c: [
+            { t: "计算 dt = now - lastTime", tag: "细节", code: "Engine::tick", d: "取本帧间隔；限制最大 dt 防止物理爆炸。", f: "engine/Engine.cpp" }
+          ]
+        },
+        {
+          t: "事件广播 + XR 包裹", tag: "子流程", code: "events::BeforeTick / Tick / AfterTick",
+          d: "向 JS/原生监听者广播帧事件；XR 下经 xr->beginRenderFrame / endRenderFrame 包裹。",
+          c: [
+            { t: "events::BeforeTick 广播", tag: "步骤", code: "events::BeforeTick::broadcast()", d: "帧前钩子（XR：xr->beginRenderFrame）。" },
+            { t: "_scheduler->update(dt)", tag: "步骤", code: "_scheduler->update(dt)", f: "engine/Engine.cpp", d: "Engine.cpp:314：触发注册的 JS tick 回调——JS 游戏逻辑在此被调用，进而调用 root.frameMove(dt, totalFrames)。" },
+            { t: "se::ScriptEngine::mainLoopUpdate() — 空实现", tag: "代码", code: "se::ScriptEngine::mainLoopUpdate", f: "bindings/jswrapper/ScriptEngine.cpp", d: "Engine.cpp:318：此函数为 stub（空实现），并不驱动 JS。JS 帧逻辑由『调度器 tick 回调』路径驱动，而非 mainLoopUpdate。" },
+            { t: "events::Tick 广播(dt)", tag: "步骤", code: "events::Tick::broadcast(dt)", d: "主帧事件；调度器与 JS 监听者据此推进（Engine.cpp:317，位于 mainLoopUpdate 之前）。" },
+            { t: "DeferredReleasePool::clear()", tag: "代码", code: "DeferredReleasePool::clear", f: "engine/Engine.cpp", d: "本帧延迟释放的对象统一回收。" },
+            { t: "runFunctionsToBePerformedInCocosThread()", tag: "步骤", code: "runFunctionsToBePerformedInCocosThread", d: "Engine.cpp:324：执行跨线程投递到 Cocos 线程的待办函数。" },
+            { t: "events::AfterTick 广播", tag: "步骤", code: "events::AfterTick::broadcast()", d: "帧后钩子（XR：xr->endRenderFrame）。" }
+          ]
+        },
+        {
+          t: "驱动 JS 逻辑帧（→ Root::frameMove）", tag: "子流程", code: "_scheduler->update(dt)",
+          d: "JS 帧逻辑由 Scheduler 的 tick 回调驱动（见上）。逻辑末段通过绑定调用 Root::frameMove(dt, totalFrames)，进入渲染总控。",
+          c: [
+            {
+              t: "组件更新 update / lateUpdate", tag: "步骤",
+              d: "遍历场景组件，执行脚本逻辑更新。",
+              c: [
+                { t: "Node 层级脏标记传播", tag: "细节", code: "Node::_transformFlags", d: "位置/旋转/缩放改动置脏，供后续世界矩阵重算。", f: "core/scene-graph/Node.h" }
+              ]
+            },
+            {
+              t: "物理系统步进", tag: "步骤", code: "IWorld::step(dt)",
+              d: "物理世界按固定步长模拟，回写刚体变换到 Node。", f: "physics/spec/IWorld.h",
+              c: [
+                { t: "PhysX 模拟 simulate/fetchResults", tag: "细节", code: "PhysXWorld::step", f: "physics/physx/PhysXWorld.h", d: "调用 PhysX 引擎推进一步。" },
+                { t: "碰撞/触发事件回调", tag: "细节", code: "PhysXEventManager", f: "physics/physx/PhysXEventManager.h", d: "命中对分发到脚本回调。" }
+              ]
+            },
+            {
+              t: "调用 Root::frameMove(dt, totalFrames)", tag: "代码", code: "root.frameMove", f: "core/Root.cpp",
+              d: "JS 帧逻辑末段驱动渲染总控（详见阶段 ②）。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      t: "② Root::frameMove() 场景/渲染驱动",
+      tag: "阶段", code: "Root::frameMove(dt, totalFrames)", f: "core/Root.cpp",
+      d: "渲染总控每帧推进，内分 frameMoveBegin → frameMoveProcess → frameMoveEnd 三段。持有 std::unique_ptr<render::PipelineRuntime> _pipelineRuntime（Root.h:317），render() 即调其上。",
+      c: [
+        {
+          t: "frameMoveBegin() 每帧准备", tag: "子流程", code: "Root::frameMoveBegin()", f: "core/Root.cpp",
+          d: "移除上帧批次，刷新 2D 合批器，清空相机列表，为本次渲染做准备（Root.cpp:384）。",
+          c: [
+            { t: "scene->removeBatches()", tag: "代码", code: "scene->removeBatches()", f: "core/Root.cpp", d: "Root.cpp:385：逐个 scene 清除缓存的绘制批次，避免跨帧污染。" },
+            { t: "_batcher->update()", tag: "代码", code: "Batcher2d::update", f: "core/Root.cpp", d: "Root.cpp:390：2D 渲染合批器预处理本帧图元。" },
+            { t: "_cameraList.clear()", tag: "代码", code: "_cameraList.clear()", f: "core/Root.cpp", d: "Root.cpp:394：清空相机列表，等待 frameMoveProcess 重新提取。" }
+          ]
+        },
+        {
+          t: "frameMoveProcess() 相机 / 场景", tag: "子流程", code: "Root::frameMoveProcess(useCameras, totalFrames)", f: "core/Root.cpp",
+          d: "从各窗口提取相机 → 获取交换链 → 更新场景数据（Root.cpp:397）。",
+          c: [
+            {
+              t: "extractRenderCameras() 提取相机", tag: "步骤", code: "window->extractRenderCameras(_cameraList)", f: "core/Root.cpp",
+              d: "Root.cpp:399：遍历各 RenderWindow 收集本帧可见相机。",
+              c: [
+                { t: "RenderWindow::extractRenderCameras", tag: "代码", code: "RenderWindow::extractRenderCameras", f: "scene/RenderWindow.cpp", d: "RenderWindow.cpp:160。" },
+                { t: "camera->update()", tag: "代码", code: "camera->update()", f: "scene/RenderWindow.cpp", d: "RenderWindow.cpp:163：重算相机视锥/视图/投影矩阵。" },
+                { t: "cameras.emplace_back(camera)", tag: "代码", code: "cameras.emplace_back", f: "scene/RenderWindow.cpp", d: "RenderWindow.cpp:164：加入相机列表。" }
+              ]
+            },
+            {
+              t: "device->acquire(swapchains) 获取交换链", tag: "步骤", code: "_device->acquire(_swapchains)", f: "core/Root.cpp",
+              d: "Root.cpp:403：取得下一个可用后备缓冲（主线程/渲染线程同步点）。",
+              c: [
+                { t: "→ CCVKDevice::acquire → vkAcquireNextImageKHR", tag: "代码", code: "vkAcquireNextImageKHR", f: "renderer/gfx-vulkan/VKDevice.cpp", d: "VKDevice.cpp:611 / :647（Vulkan 后端）。" },
+                { t: "→ GLES3Device::acquire（makeCurrent，无独立 acquire）", tag: "代码", code: "GLES3Device::acquire", f: "renderer/gfx-gles3/GLES3Device.cpp", d: "GLES3Device.cpp:277：GL 后台缓冲获取隐式包含在 eglSwapBuffers 中，无 vkAcquireNextImageKHR 等价物。" }
+              ]
+            },
+            {
+              t: "_batcher->uploadBuffers()", tag: "步骤", code: "_batcher->uploadBuffers()", f: "core/Root.cpp",
+              d: "Root.cpp:409：上传 2D 合批器的顶点/索引缓冲到 GPU。"
+            },
+            {
+              t: "scene->update(stamp) 更新场景", tag: "步骤", code: "scene->update(stamp)", f: "core/Root.cpp",
+              d: "Root.cpp:414：重算节点世界矩阵与动画，刷新渲染可用数据集合（仅 isNeedUpdateScene==true 时）。",
+              c: [
+                { t: "RenderScene::update", tag: "代码", code: "RenderScene::update", f: "scene/RenderScene.cpp", d: "RenderScene.cpp:163。" },
+                { t: "_mainLight->update() + light->update()", tag: "代码", code: "light->update()", f: "scene/RenderScene.cpp", d: "RenderScene.cpp:167-178：刷新光源 uniform（模型数据也在此时更新）。" }
+              ]
+            }
+          ]
+        },
+        {
+          t: "frameMoveEnd() 排序 / 管线 / 呈现", tag: "子流程", code: "Root::frameMoveEnd()", f: "core/Root.cpp",
+          d: "相机按优先级排序 → 事件钩子 → 管线渲染 → 呈现（Root.cpp:422）。",
+          c: [
+            { t: "emit<BeforeCommit>()", tag: "代码", code: "emit<BeforeCommit>()", f: "core/Root.cpp", d: "Root.cpp:424：渲染前提交钩子。" },
+            { t: "std::stable_sort(_cameraList by priority)", tag: "代码", code: "std::stable_sort(_cameraList)", f: "core/Root.cpp", d: "Root.cpp:425：决定多相机渲染先后（不透明/透明顺序）。" },
+            { t: "emit<BeforeRender>()", tag: "代码", code: "emit<BeforeRender>()", f: "core/Root.cpp", d: "Root.cpp:441：派发渲染前钩子，供上层插入自定义逻辑。" },
+            {
+              t: "_pipelineRuntime->render(_cameraList) 管线渲染", tag: "代码", code: "_pipelineRuntime->render(_cameraList)", f: "core/Root.cpp",
+              d: "Root.cpp:442：调用渲染管线（详见阶段 ③）。Legacy 时 _pipelineRuntime 为 RenderPipelineBridge（Root.cpp:201→202：render → pipeline->render(cameras)）；自定义管线由 Factory::createPipeline 创建。",
+              c: [
+                { t: "RenderPipelineBridge::render → pipeline->render(cameras)", tag: "代码", code: "pipeline->render(cameras)", f: "core/Root.cpp", d: "Root.cpp:201-202：转发到具体 RenderPipeline::render。" }
+              ]
+            },
+            { t: "emit<AfterRender>()", tag: "代码", code: "emit<AfterRender>()", f: "core/Root.cpp", d: "Root.cpp:443：管线录制提交完成后派发。" },
+            { t: "device->present() 呈现", tag: "代码", code: "_device->present()", f: "core/Root.cpp", d: "Root.cpp:445：提交交换链到呈现引擎（详见阶段 ⑤）。" },
+            { t: "emit<AfterPresent>()", tag: "代码", code: "emit<AfterPresent>()", f: "core/Root.cpp", d: "Root.cpp:446：呈现后钩子；一帧渲染收尾。" },
+            { t: "_batcher->reset()", tag: "代码", code: "_batcher->reset()", f: "core/Root.cpp", d: "Root.cpp:450：重置 2D 合批器状态。" }
+          ]
+        }
+      ]
+    },
+    {
+      t: "③ RenderPipeline::render() 管线执行",
+      tag: "阶段", code: "RenderPipeline::render(cameras)", f: "renderer/pipeline/RenderPipeline.cpp",
+      d: "基类 RenderPipeline::render（RenderPipeline.cpp:104）仅作 fallback 遍历 _flows；实际主路径为 ForwardPipeline::render 覆写。下方 drill 到真实函数调用。",
+      c: [
+        {
+          t: "传统管线 (Legacy: ForwardPipeline)", tag: "子流程", code: "ForwardPipeline::render", f: "renderer/pipeline/forward/ForwardPipeline.cpp",
+          d: "ForwardPipeline.cpp:97 覆写 render，是实际主渲染路径。",
+          c: [
+            { t: "_commandBuffers[0]->begin()", tag: "代码", code: "_commandBuffers[0]->begin()", f: "renderer/pipeline/forward/ForwardPipeline.cpp", d: "ForwardPipeline.cpp:109：开始录制主命令缓冲。", c: [
+              { t: "→ CommandBufferAgent::begin（主线程入队 actor->begin）", tag: "代码", code: "CommandBufferAgent::begin", f: "renderer/gfx-agent/CommandBufferAgent.cpp", d: "ForwardPipeline.cpp:109 经装饰器链调到 CommandBufferAgent.cpp:139：把 actor->begin 入 MessageQueue（:148），渲染线程执行。" },
+              { t: "→ [Vulkan] CCVKCommandBuffer::begin → vkBeginCommandBuffer", tag: "代码", code: "vkBeginCommandBuffer", f: "renderer/gfx-vulkan/VKCommandBuffer.cpp", d: "VKCommandBuffer.cpp:85 取命令缓冲 → :120 vkBeginCommandBuffer。" },
+              { t: "→ [GLES3] GLES3PrimaryCommandBuffer::begin", tag: "代码", code: "GLES3PrimaryCommandBuffer::begin", f: "renderer/gfx-gles3/GLES3PrimaryCommandBuffer.cpp", d: "GLES3PrimaryCommandBuffer.cpp:48：重置 GL 状态机（此时不产生 gl* 调用）。" }
+            ] },
+            { t: "_pipelineUBO->updateMultiCameraUBO(...)", tag: "代码", code: "PipelineUBO::updateMultiCameraUBO", f: "renderer/pipeline/PipelineUBO.cpp", d: "ForwardPipeline.cpp:115 → PipelineUBO.cpp:529：写入所有 camera 的 UBO 到 _cameraBuffer，重置动态 offset。" },
+            { t: "_pipelineUBO->updateGlobalUBO(cameras[0])", tag: "代码", code: "PipelineUBO::updateGlobalUBO", f: "renderer/pipeline/PipelineUBO.cpp", d: "ForwardPipeline.cpp:116 → PipelineUBO.cpp:508：GLOBAL 描述符集更新（ds->update + updateGlobalUBOView + bindBuffer/update）。" },
+            {
+              t: "每相机循环 (per-camera)", tag: "步骤", code: "for each camera", f: "renderer/pipeline/forward/ForwardPipeline.cpp",
+              d: "ForwardPipeline.cpp:121：逐相机执行剔除与场景阶段。",
+              c: [
+                { t: "validPunctualLightsCulling(this, camera)", tag: "代码", code: "validPunctualLightsCulling", f: "renderer/pipeline/SceneCulling.cpp", d: "ForwardPipeline.cpp:124 → SceneCulling.cpp:68：点光/聚光/球光视锥裁剪，结果 addValidPunctualLight。" },
+                {
+                  t: "sceneCulling(this, camera)", tag: "代码", code: "sceneCulling()", f: "renderer/pipeline/SceneCulling.cpp",
+                  d: "ForwardPipeline.cpp:125 → SceneCulling.cpp:173：视锥剔除收集可见对象。",
+                  c: [
+                    { t: "clearRenderObjects() → aabbFrustum 裁剪", tag: "细节", code: "sceneCulling", d: "遍历 scene->getModels() 做 AABB×视锥相交测试。" },
+                    { t: "addRenderObject(genRenderObject(...))", tag: "代码", code: "addRenderObject", f: "renderer/pipeline/SceneCulling.cpp", d: "SceneCulling.cpp:224 / 259 / 265：生成并登记可见渲染对象（含排序深度）。" },
+                    { t: "csmLayers->addCastShadowObject / addLayerObject", tag: "细节", code: "csmLayers->add*", d: "阴影投射者登记到 CSM 层级。" }
+                  ]
+                },
+                {
+                  t: "flow->render(camera) 逐 Flow", tag: "步骤", code: "flow->render(camera)", f: "renderer/pipeline/forward/ForwardPipeline.cpp",
+                  d: "ForwardPipeline.cpp:128：每个 RenderFlow（如 ForwardFlow）执行其 Stage。",
+                  c: [
+                    {
+                      t: "ForwardStage::render", tag: "代码", code: "ForwardStage::render", f: "renderer/pipeline/forward/ForwardStage.cpp",
+                      d: "ForwardStage.cpp:137：主场景前向渲染阶段。",
+                      c: [
+                        { t: "dispenseRenderObject2Queues()", tag: "代码", code: "dispenseRenderObject2Queues", f: "renderer/pipeline/forward/ForwardStage.cpp", d: "ForwardStage.cpp:149 → :93：遍历 renderObjects，按 pass 调 queue->insertRenderPass()（:123 → RenderQueue.cpp:49 入队）。" },
+                        { t: "_renderQueues[i]->sort()", tag: "代码", code: "RenderQueue::sort", f: "renderer/pipeline/RenderQueue.cpp", d: "ForwardStage.cpp:133 → RenderQueue.cpp:69：std::sort 排序（不透明 FRONT_TO_BACK / 透明 BACK_TO_FRONT）。" },
+                        { t: "updateShadowUBO(camera)", tag: "代码", code: "PipelineUBO::updateShadowUBO", f: "renderer/pipeline/PipelineUBO.cpp", d: "ForwardStage.cpp:151 → PipelineUBO.cpp:560：SHADOW 描述符集更新（bindTexture(SHADOWMAP) + ds->update + updateBuffer）。" },
+                        { t: "addPass(forwardSetup, forwardExec)", tag: "代码", code: "addPass", f: "renderer/pipeline/forward/ForwardStage.cpp", d: "ForwardStage.cpp:278：把 forward pass 注册进 FrameGraph。" },
+                        {
+                          t: "_fg.compile() / _fg.execute() 录制命令", tag: "代码", code: "_fg.execute()", f: "renderer/pipeline/forward/ForwardStage.cpp",
+                          d: "ForwardStage.cpp:130 / :131：execute 触发 forwardExec lambda（:250），实际录制命令。",
+                          c: [
+                            { t: "cmdBuff->bindDescriptorSet(globalSet, ...)", tag: "代码", code: "bindDescriptorSet(GLOBAL)", f: "renderer/pipeline/forward/ForwardStage.cpp", d: "ForwardStage.cpp:253：绑定 GLOBAL 描述符集（带 camera UBO 动态 offset）。" },
+                            {
+                              t: "_renderQueues[0]->recordCommandBuffer(...)", tag: "代码", code: "RenderQueue::recordCommandBuffer", f: "renderer/pipeline/RenderQueue.cpp",
+                              d: "ForwardStage.cpp:255 → RenderQueue.cpp:80：逐渲染对象录制。",
+                              c: [
+                                { t: "PipelineStateManager::getOrCreatePipelineState", tag: "代码", code: "getOrCreatePipelineState", f: "renderer/pipeline/RenderQueue.cpp", d: "RenderQueue.cpp:106：取/建 PSO。" },
+                                { t: "cmdBuff->bindPipelineState(pso)", tag: "代码", code: "bindPipelineState", f: "renderer/pipeline/RenderQueue.cpp", d: "RenderQueue.cpp:108。" },
+                                { t: "cmdBuff->bindDescriptorSet(materialSet, pass->getDescriptorSet())", tag: "代码", code: "bindDescriptorSet(MATERIAL)", f: "renderer/pipeline/RenderQueue.cpp", d: "RenderQueue.cpp:109：绑定 MATERIAL 描述符集。" },
+                                { t: "cmdBuff->bindDescriptorSet(localSet, subModel->getDescriptorSet())", tag: "代码", code: "bindDescriptorSet(LOCAL)", f: "renderer/pipeline/RenderQueue.cpp", d: "RenderQueue.cpp:110：绑定 LOCAL 描述符集（每 SubModel）。" },
+                                { t: "cmdBuff->bindInputAssembler(inputAssembler)", tag: "代码", code: "bindInputAssembler", f: "renderer/pipeline/RenderQueue.cpp", d: "RenderQueue.cpp:111。" },
+                                { t: "cmdBuff->draw(inputAssembler)", tag: "代码", code: "cmdBuff->draw", f: "renderer/pipeline/RenderQueue.cpp", d: "RenderQueue.cpp:112：叶子 draw 命令，进入阶段 ④ 的 GFX 提交。" }
+                              ]
+                            },
+                            { t: "_instancedQueue->recordCommandBuffer", tag: "代码", code: "InstancedQueue::recordCommandBuffer", f: "renderer/pipeline/forward/ForwardStage.cpp", d: "ForwardStage.cpp:256：实例化队列录制。" },
+                            { t: "_additiveLightQueue->recordCommandBuffer", tag: "代码", code: "AdditiveLightQueue::recordCommandBuffer", f: "renderer/pipeline/forward/ForwardStage.cpp", d: "ForwardStage.cpp:257：多光源叠加队列录制。" },
+                            { t: "_renderQueues[1]->recordCommandBuffer", tag: "代码", code: "RenderQueue::recordCommandBuffer", f: "renderer/pipeline/forward/ForwardStage.cpp", d: "ForwardStage.cpp:261：半透明队列录制。" }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            { t: "_commandBuffers[0]->end() → flushCommands → getQueue()->submit", tag: "代码", code: "_device->getQueue()->submit", f: "renderer/pipeline/forward/ForwardPipeline.cpp", d: "ForwardPipeline.cpp:140 end → :141 flushCommands → :142 getQueue()->submit，进入阶段 ⑤。", c: [
+              { t: "→ CommandBufferAgent::end（主线程入队 actor->end）", tag: "代码", code: "CommandBufferAgent::end", f: "renderer/gfx-agent/CommandBufferAgent.cpp", d: "ForwardPipeline.cpp:140 经装饰器链调到 CommandBufferAgent.cpp:152：把 actor->end 入 MessageQueue（:157），渲染线程执行。" },
+              { t: "→ [Vulkan] CCVKCommandBuffer::end → vkEndCommandBuffer", tag: "代码", code: "vkEndCommandBuffer", f: "renderer/gfx-vulkan/VKCommandBuffer.cpp", d: "VKCommandBuffer.cpp:126 → :133 vkEndCommandBuffer；把 vkCmdBuf 推入 _pendingQueue(:136) 等待 execute。" },
+              { t: "→ [GLES3] GLES3PrimaryCommandBuffer::end（补发延迟 GL 状态）", tag: "代码", code: "GLES3PrimaryCommandBuffer::end", f: "renderer/gfx-gles3/GLES3PrimaryCommandBuffer.cpp", d: "GLES3PrimaryCommandBuffer.cpp:58：若状态脏补发 gl*；GL 无独立 end 概念。" },
+              { t: "→ flushCommands() 触发渲染线程排空队列", tag: "代码", code: "flushCommands", f: "renderer/pipeline/forward/ForwardPipeline.cpp", d: "ForwardPipeline.cpp:141：_device->flushCommands() → CommandBufferAgent::flushMessages()（CommandBufferAgent.cpp:53）排空 MessageQueue，渲染线程开始真正执行。" }
+            ] }
+          ]
+        },
+        {
+          t: "自定义管线 (Custom RenderGraph)", tag: "子流程", code: "render::PipelineRuntime", f: "renderer/pipeline/custom/",
+          d: "基于图（Graph）描述的现代可编程管线；绘制命令在 NativeRenderQueue 的 recordCommandBuffer 内发出。",
+          c: [
+            {
+              t: "构建 Build（脚本/C++）", tag: "步骤", code: "beginFrame / addRenderPass / addQueue", f: "renderer/pipeline/custom/RenderInterfaceTypes.h",
+              d: "BasicPipeline::beginFrame → addRenderPass(w,h,name) → addQueue → addSceneOfCamera / addFullscreenQuad。",
+              c: [
+                { t: "声明渲染资源 / Pass 依赖", tag: "细节", d: "登记纹理/缓冲及其用途，建立资源生产-消费边，形成 DAG。" }
+              ]
+            },
+            {
+              t: "编译 Compile（FGDispatcher）", tag: "步骤", code: "FrameGraphDispatcher", f: "renderer/pipeline/custom/FrameGraphDispatcher.h",
+              d: "endFrame() 触发：分析资源读写依赖，推导屏障与 layout 转换，裁剪无贡献 Pass，别名复用瞬态资源。"
+            },
+            {
+              t: "执行 Execute（NativeExecutorRenderGraph）", tag: "步骤", code: "NativeExecutorRenderGraph", f: "renderer/pipeline/custom/NativeExecutorRenderGraph.h",
+              d: "按编译结果遍历图节点，把每个 Pass 转译为 GFX CommandBuffer 录制。",
+              c: [
+                { t: "RenderDrawQueue::recordCommandBuffer → cmdBuff->draw", tag: "代码", code: "cmdBuff->draw(inputAssembler)", f: "renderer/pipeline/custom/NativeRenderQueue.cpp", d: "NativeRenderQueue.cpp:133 → :147 bindPipelineState → :148/150/152 bindDescriptorSet(MATERIAL/LOCAL) → :154 bindInputAssembler → :155 cmdBuff->draw（叶子绘制，进入阶段 ④）。" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      t: "④ GFX 设备提交 (CommandBuffer 录制 → draw)",
+      tag: "阶段", code: "gfx::Device / CommandBuffer", f: "renderer/gfx-base/GFXDevice.h",
+      d: "抽象 GFX 层通过装饰器链把命令送到具体后端；后端以 Vulkan 与 GLES3 为主，两者走同一套 GFX 接口，仅在最底层翻译不同。下方 drill 到真实 draw 分发。",
+      c: [
+        {
+          t: "装饰器链 (Validator ⊃ Agent，包裹后端)", tag: "子流程", code: "DeviceValidator → DeviceAgent → CCVKDevice/GLES3Device",
+          d: "组装顺序：真实 Device → DeviceAgent(可分离线程) → DeviceValidator(Debug)。最外层对上层透明。", f: "renderer/GFXDeviceManager.h",
+          c: [
+            { t: "DeviceAgent 多线程代理（主线程编码 → 渲染线程执行）", tag: "细节", code: "DeviceAgent / MessageQueue", f: "renderer/gfx-agent/DeviceAgent.h", d: "主线程只编码命令入 MessageQueue；管线调 _device->flushCommands() → CommandBufferAgent::flushMessages()（CommandBufferAgent.cpp:53）后，渲染线程执行。" },
+            { t: "DeviceValidator 参数校验", tag: "细节", code: "gfx-validator", f: "renderer/gfx-validator/", d: "Debug 下校验 API 调用合法性/状态机/生命周期；生产构建完全移除。" }
+          ]
+        },
+        {
+          t: "CommandBuffer 抽象录制序列（逐方法 drill）", tag: "子流程", code: "CommandBuffer", f: "renderer/gfx-base/GFXCommandBuffer.h",
+          d: "标准录制流程（贴近 Vulkan 风格）。注意：基类 gfx-base/GFXCommandBuffer 只实现 initialize/destroy，begin/end/draw/execute 均为纯虚，由装饰器链下发到后端。每个方法 drill：CommandBufferAgent(主线程入队) → CCVKCommandBuffer(渲染线程 vk*) / GLES3PrimaryCommandBuffer(渲染线程 gl*)。",
+          c: [
+            {
+              t: "begin() 开始录制", tag: "步骤", code: "CommandBuffer::begin", f: "renderer/gfx-base/GFXCommandBuffer.h",
+              c: [
+                { t: "CommandBufferAgent::begin → ENQUEUE_MESSAGE", tag: "代码", code: "CommandBufferAgent::begin", f: "renderer/gfx-agent/CommandBufferAgent.cpp", d: "CommandBufferAgent.cpp:139：主线程把 actor->begin 入队（:148），渲染线程执行。" },
+                { t: "[Vulkan] CCVKCommandBuffer::begin → vkBeginCommandBuffer", tag: "代码", code: "vkBeginCommandBuffer", f: "renderer/gfx-vulkan/VKCommandBuffer.cpp", d: "VKCommandBuffer.cpp:85 取命令缓冲 → :120 vkBeginCommandBuffer。" },
+                { t: "[GLES3] GLES3PrimaryCommandBuffer::begin", tag: "代码", code: "GLES3PrimaryCommandBuffer::begin", f: "renderer/gfx-gles3/GLES3PrimaryCommandBuffer.cpp", d: "GLES3PrimaryCommandBuffer.cpp:48：重置 GL 状态机（不产生 gl* 调用）。" }
+              ]
+            },
+            {
+              t: "beginRenderPass() 进入渲染通道", tag: "步骤", code: "CommandBuffer::beginRenderPass", f: "renderer/gfx-base/GFXCommandBuffer.h",
+              c: [
+                { t: "CommandBufferAgent::beginRenderPass → ENQUEUE_MESSAGE_9", tag: "代码", code: "CommandBufferAgent::beginRenderPass", f: "renderer/gfx-agent/CommandBufferAgent.cpp", d: "CommandBufferAgent.cpp:161 → :189 actor->beginRenderPass。" },
+                { t: "[Vulkan] CCVKCommandBuffer::beginRenderPass → vkCmdBeginRenderPass", tag: "代码", code: "vkCmdBeginRenderPass", f: "renderer/gfx-vulkan/VKCommandBuffer.cpp", d: "VKCommandBuffer.cpp:140 建 VkRenderPassBeginInfo → :198 vkCmdBeginRenderPass → :206 vkCmdSetViewport → :208 vkCmdSetScissor。" },
+                { t: "[GLES3] GLES3PrimaryCommandBuffer::beginRenderPass → cmdFuncGLES3BeginRenderPass", tag: "代码", code: "cmdFuncGLES3BeginRenderPass", f: "renderer/gfx-gles3/GLES3Commands.cpp", d: "GLES3PrimaryCommandBuffer.cpp:64 → :70 cmdFuncGLES3BeginRenderPass（GLES3Commands.cpp:1831）：glBindFramebuffer(:1854) → glViewport(:1862) → glClear(:1892)。" }
+              ]
+            },
+            {
+              t: "bindPipelineState() 绑定管线状态", tag: "步骤", code: "CommandBuffer::bindPipelineState", f: "renderer/gfx-base/GFXCommandBuffer.h",
+              c: [
+                { t: "CommandBufferAgent::bindPipelineState → ENQUEUE_MESSAGE_2", tag: "代码", code: "CommandBufferAgent::bindPipelineState", f: "renderer/gfx-agent/CommandBufferAgent.cpp", d: "CommandBufferAgent.cpp:249 → :255 actor->bindPipelineState。" },
+                { t: "[Vulkan] CCVKCommandBuffer::bindPipelineState → vkCmdBindPipeline", tag: "代码", code: "vkCmdBindPipeline", f: "renderer/gfx-vulkan/VKCommandBuffer.cpp", d: "VKCommandBuffer.cpp:295 → :299 vkCmdBindPipeline。" },
+                { t: "[GLES3] GLES3PrimaryCommandBuffer::bindPipelineState → 仅缓存", tag: "代码", code: "GLES3CommandBuffer::bindPipelineState", f: "renderer/gfx-gles3/GLES3CommandBuffer.cpp", d: "GLES3PrimaryCommandBuffer.cpp 继承 GLES3CommandBuffer.cpp:151：仅缓存 gpuPipelineState，延迟到 bindStates 才 glUseProgram。" }
+              ]
+            },
+            {
+              t: "bindDescriptorSet() 绑定描述符集", tag: "步骤", code: "CommandBuffer::bindDescriptorSet", f: "renderer/gfx-base/GFXCommandBuffer.h",
+              c: [
+                { t: "CommandBufferAgent::bindDescriptorSet → ENQUEUE_MESSAGE_5", tag: "代码", code: "CommandBufferAgent::bindDescriptorSet", f: "renderer/gfx-agent/CommandBufferAgent.cpp", d: "CommandBufferAgent.cpp:259 → :274 actor->bindDescriptorSet。" },
+                { t: "[Vulkan] CCVKCommandBuffer::bindDescriptorSet → 仅缓存（延迟）", tag: "代码", code: "CCVKCommandBuffer::bindDescriptorSet", f: "renderer/gfx-vulkan/VKCommandBuffer.cpp", d: "VKCommandBuffer.cpp:304：写入 _curGPUDescriptorSets，不立即 vk；draw 前若脏才发 vkCmdBindDescriptorSets（bindDescriptorSets :756 → :781）。" },
+                { t: "[GLES3] GLES3PrimaryCommandBuffer::bindDescriptorSet → 仅缓存（延迟）", tag: "代码", code: "GLES3CommandBuffer::bindDescriptorSet", f: "renderer/gfx-gles3/GLES3CommandBuffer.cpp", d: "GLES3PrimaryCommandBuffer.cpp:159：仅缓存；实际 glUseProgram/glBindTexture/glBindBufferRange 在 bindStates → cmdFuncGLES3BindState（:244 → GLES3Commands.cpp:2000）按序发出。" }
+              ]
+            },
+            {
+              t: "bindInputAssembler() 绑定顶点/索引缓冲", tag: "步骤", code: "CommandBuffer::bindInputAssembler", f: "renderer/gfx-base/GFXCommandBuffer.h",
+              c: [
+                { t: "CommandBufferAgent::bindInputAssembler → ENQUEUE_MESSAGE_2", tag: "代码", code: "CommandBufferAgent::bindInputAssembler", f: "renderer/gfx-agent/CommandBufferAgent.cpp", d: "CommandBufferAgent.cpp:278 → :284 actor->bindInputAssembler。" },
+                { t: "[Vulkan] CCVKCommandBuffer::bindInputAssembler → vkCmdBindVertexBuffers / vkCmdBindIndexBuffer", tag: "代码", code: "vkCmdBindVertexBuffers", f: "renderer/gfx-vulkan/VKCommandBuffer.cpp", d: "VKCommandBuffer.cpp:321 → :338 vkCmdBindVertexBuffers → :342 vkCmdBindIndexBuffer。" },
+                { t: "[GLES3] GLES3PrimaryCommandBuffer::bindInputAssembler → 仅缓存（延迟）", tag: "代码", code: "GLES3CommandBuffer::bindInputAssembler", f: "renderer/gfx-gles3/GLES3CommandBuffer.cpp", d: "GLES3PrimaryCommandBuffer.cpp:176：仅缓存；glBindVertexArray 在 cmdFuncGLES3BindState(:2354) 发出。" }
+              ]
+            },
+            {
+              t: "draw() 发出绘制（见下方专项）", tag: "步骤", code: "CommandBuffer::draw", f: "renderer/gfx-base/GFXCommandBuffer.h",
+              d: "绑定 PSO/DescriptorSet/IA 后逐对象绘制。完整分发见同层『draw() 实际分发』节点。"
+            },
+            {
+              t: "endRenderPass() 退出渲染通道", tag: "步骤", code: "CommandBuffer::endRenderPass", f: "renderer/gfx-base/GFXCommandBuffer.h",
+              c: [
+                { t: "CommandBufferAgent::endRenderPass → 入队 actor->endRenderPass", tag: "代码", code: "CommandBufferAgent::endRenderPass", f: "renderer/gfx-agent/CommandBufferAgent.cpp", d: "主线程录制方式与其他方法一致（ENQUEUE_MESSAGE），渲染线程执行。" },
+                { t: "[Vulkan] CCVKCommandBuffer::endRenderPass → vkCmdEndRenderPass", tag: "代码", code: "vkCmdEndRenderPass", f: "renderer/gfx-vulkan/VKCommandBuffer.cpp", d: "VKCommandBuffer.cpp:217。" },
+                { t: "[GLES3] 无显式 endRenderPass", tag: "细节", d: "GL 无 renderPass 概念；状态/clear 已在 beginRenderPass 与 bindStates 中完成。" }
+              ]
+            },
+            {
+              t: "end() 结束录制", tag: "步骤", code: "CommandBuffer::end", f: "renderer/gfx-base/GFXCommandBuffer.h",
+              c: [
+                { t: "CommandBufferAgent::end → ENQUEUE_MESSAGE_1", tag: "代码", code: "CommandBufferAgent::end", f: "renderer/gfx-agent/CommandBufferAgent.cpp", d: "CommandBufferAgent.cpp:152 → :157 actor->end。" },
+                { t: "[Vulkan] CCVKCommandBuffer::end → vkEndCommandBuffer", tag: "代码", code: "vkEndCommandBuffer", f: "renderer/gfx-vulkan/VKCommandBuffer.cpp", d: "VKCommandBuffer.cpp:126 → :133 vkEndCommandBuffer；把 vkCmdBuf 推入 _pendingQueue(:136) 等待 execute。" },
+                { t: "[GLES3] GLES3PrimaryCommandBuffer::end（补发延迟 GL 状态）", tag: "代码", code: "GLES3PrimaryCommandBuffer::end", f: "renderer/gfx-gles3/GLES3PrimaryCommandBuffer.cpp", d: "GLES3PrimaryCommandBuffer.cpp:58：若状态脏补发 gl*；GL 无独立 end 概念。" }
+              ]
+            },
+            {
+              t: "execute() 提交 / 重放", tag: "步骤", code: "CommandBuffer::execute", f: "renderer/gfx-base/GFXCommandBuffer.h",
+              c: [
+                { t: "CommandBufferAgent::execute → ENQUEUE_MESSAGE_3", tag: "代码", code: "CommandBufferAgent::execute", f: "renderer/gfx-agent/CommandBufferAgent.cpp", d: "CommandBufferAgent.cpp:231 → :245 actor->execute。" },
+                { t: "[Vulkan] CCVKCommandBuffer::execute → vkCmdExecuteCommands", tag: "代码", code: "vkCmdExecuteCommands", f: "renderer/gfx-vulkan/VKCommandBuffer.cpp", d: "VKCommandBuffer.cpp:538：弹出次级缓冲 _pendingQueue，:555 vkCmdExecuteCommands（仅当存在次级 CB）。" },
+                { t: "[GLES3] GLES3PrimaryCommandBuffer::execute → cmdFuncGLES3ExecuteCmds", tag: "代码", code: "cmdFuncGLES3ExecuteCmds", f: "renderer/gfx-gles3/GLES3Commands.cpp", d: "GLES3PrimaryCommandBuffer.cpp:213 → :220：逐次级 package 调 cmdFuncGLES3ExecuteCmds（GLES3Commands.cpp:3007），按 GLESCmdType 分发到 BeginRenderPass/BindStates/Draw/UpdateBuffer/Copy。" }
+              ]
+            }
+          ]
+        },
+        {
+          t: "draw() 实际分发（两种后端）", tag: "子流程", code: "CommandBufferAgent::draw", f: "renderer/gfx-agent/CommandBufferAgent.cpp",
+          d: "管线层 cmdBuff->draw 经装饰器分发到真实后端。",
+          c: [
+            { t: "CommandBufferAgent::draw → actor->draw(info) 入 CB MessageQueue", tag: "代码", code: "CommandBufferAgent::draw", f: "renderer/gfx-agent/CommandBufferAgent.cpp", d: "CommandBufferAgent.cpp:383：主线程记录，渲染线程执行。" },
+            {
+              t: "[Vulkan] CCVKCommandBuffer::draw", tag: "代码", code: "CCVKCommandBuffer::draw", f: "renderer/gfx-vulkan/VKCommandBuffer.cpp",
+              d: "VKCommandBuffer.cpp:458：绑定脏描述符集后发出 vkCmd。",
+              c: [
+                { t: "bindDescriptorSets → vkCmdBindDescriptorSets", tag: "代码", code: "vkCmdBindDescriptorSets", f: "renderer/gfx-vulkan/VKCommandBuffer.cpp", d: "VKCommandBuffer.cpp:756 → :781。" },
+                { t: "vkCmdDrawIndexed / vkCmdDraw", tag: "代码", code: "vkCmdDrawIndexed / vkCmdDraw", f: "renderer/gfx-vulkan/VKCommandBuffer.cpp", d: "VKCommandBuffer.cpp:509（索引）/ :513（非索引）—— 根部 Vulkan 绘制调用。" }
+              ]
+            },
+            {
+              t: "[GLES3 次级 CB] GLES3CommandBuffer::draw", tag: "代码", code: "GLES3CommandBuffer::draw", f: "renderer/gfx-gles3/GLES3CommandBuffer.cpp",
+              d: "GLES3CommandBuffer.cpp:267：仅记录 GLES3CmdDraw 入 GLES3CmdPackage（此时不产生 GL 调用）。"
+            },
+            {
+              t: "[GLES3 主 CB] GLES3PrimaryCommandBuffer::draw", tag: "代码", code: "GLES3PrimaryCommandBuffer::draw", f: "renderer/gfx-gles3/GLES3PrimaryCommandBuffer.cpp",
+              d: "GLES3PrimaryCommandBuffer.cpp:95：绑定状态后立即执行 GL 调用。",
+              c: [
+                { t: "cmdFuncGLES3Draw → glDrawElements / glDrawArrays", tag: "代码", code: "glDrawElements / glDrawArrays", f: "renderer/gfx-gles3/GLES3Commands.cpp", d: "GLES3Commands.cpp:2509 cmdFuncGLES3Draw → :2522/:2524 glDrawElements(Instanced) / :2529/:2531 glDrawArrays(Instanced) —— 根部 GL 绘制调用。" }
+              ]
+            }
+          ]
+        },
+        {
+          t: "Vulkan 后端资源池 (GPU Hub/Pool)", tag: "子流程", code: "gfx-vulkan (CCVKDevice)", f: "renderer/gfx-vulkan/VKDevice.h",
+          d: "把 GFX 命令翻译为 Vulkan 调用，并经 GPU Hub/Pool 管理资源。",
+          c: [
+            { t: "GPU Hub/Pool 资源池", tag: "代码", d: "CCVKGPUBufferHub / DescriptorHub / SemaphorePool / RecycleBin / StagingBufferPool / VKPipelineCache", f: "renderer/gfx-vulkan/VKGPUObjects.h", d: "缓存/复用与延迟回收 Vulkan 对象；按帧索引多缓冲避免 CPU/GPU 争用。" }
+          ]
+        },
+        {
+          t: "GLES3 后端记录", tag: "子流程", code: "gfx-gles3 (GLES3Device)", f: "renderer/gfx-gles3/GLES3Device.h",
+          d: "把 GFX 命令翻译为 OpenGL ES 调用。即时模式状态机（无显式命令缓冲/屏障），命令在 primary CB 重放时直接发出 gl*。",
+          c: [
+            { t: "glUseProgram / glBindVertexArray", tag: "细节", d: "绑定着色器程序与顶点数组对象（VAO 由 GLES3InputAssembler 缓存，对应 Vulkan 的 InputAssembler）。" },
+            { t: "glActiveTexture + glBindTexture (描述符集)", tag: "细节", d: "SetIndex{GLOBAL,MATERIAL,LOCAL} 映射到激活纹理单元与 uniform 位置；无持久化描述符对象，每次绘制按序绑定。" },
+            { t: "GL 状态缓存 GLES3GPUStateCache", tag: "代码", f: "renderer/gfx-gles3/GLES3GPUObjects.h", d: "缓存已设 GL 状态（当前程序/VAO/混合/视口），跳过冗余 gl* 调用，避免状态抖动。" },
+            { t: "GL 资源对象 GLGPU* 与 EGL 上下文", tag: "代码", d: "GLGPUBuffer / GLGPUTexture / GLGPUFramebuffer；GLES3GPUContext 经 eglw 管理 EGLDisplay/Surface/Context（makeCurrent/present）。", f: "renderer/gfx-gles-common/eglw.h" },
+            { t: "函数指针 wrangler（gles3w / GLES3Wrangler）", tag: "细节", code: "GLES3Wrangler", f: "renderer/gfx-gles3/GLES3Wrangler.h", d: "动态加载 GL/EGL 函数指针（类比 Vulkan 的 volk），按扩展能力路由到真函数。" },
+            { t: "Program 缓存 GLES3PipelineCache", tag: "代码", f: "renderer/gfx-gles3/GLES3PipelineCache.h", d: "缓存已链接的 GL Program，避免重复编译着色器。" }
+          ]
+        }
+      ]
+    },
+    {
+      t: "⑤ 提交与呈现 (Submit & Present)",
+      tag: "阶段", code: "Queue::submit / Swapchain::present",
+      d: "把录制好的命令提交 GPU，并把渲染结果呈现到屏幕。Vulkan 与 GLES3 在提交机制上本质不同（见下）。",
+      c: [
+        {
+          t: "队列提交 Queue submit", tag: "子流程", code: "QueueAgent::submit / actor->submit", f: "renderer/gfx-agent/QueueAgent.cpp",
+          d: "命令缓冲提交到 GPU 队列（渲染线程执行）。",
+          c: [
+            { t: "QueueAgent::submit → actor->submit", tag: "代码", code: "QueueAgent::submit", f: "renderer/gfx-agent/QueueAgent.cpp", d: "QueueAgent.cpp:71：把 submit 入 DeviceAgent 主 MessageQueue，渲染线程执行。" },
+            {
+              t: "[Vulkan] CCVKQueue::submit → vkQueueSubmit", tag: "代码", code: "vkQueueSubmit", f: "renderer/gfx-vulkan/VKQueue.cpp",
+              d: "VKQueue.cpp:53 → :96 vkQueueSubmit：把录制好的 VkCommandBuffer 提交到图形队列。",
+              c: [
+                { t: "Fence / Semaphore 同步", tag: "细节", d: "Fence 做 CPU-GPU 同步；Semaphore 做队列间/呈现同步（_frameBoundarySemaphore 节流）。" }
+              ]
+            },
+            {
+              t: "[GLES3] GLES3Queue::submit → cmdFuncGLES3ExecuteCmds", tag: "代码", code: "cmdFuncGLES3ExecuteCmds", f: "renderer/gfx-gles3/GLES3Commands.cpp",
+              d: "GLES3Queue.cpp:49：对每个待提交 package 调 cmdFuncGLES3ExecuteCmds（GLES3Commands.cpp:3007），重放 GLES3CmdPackage 发出 gl* 调用。",
+              c: [
+                { t: "GLES3PrimaryCommandBuffer::execute 亦触发重放", tag: "代码", code: "GLES3PrimaryCommandBuffer::execute", f: "renderer/gfx-gles3/GLES3PrimaryCommandBuffer.cpp", d: "GLES3PrimaryCommandBuffer.cpp:213：同样调 cmdFuncGLES3ExecuteCmds 重放次级 CB。" },
+                { t: "说明：GLES3 无独立 vkQueueSubmit 式 fan-out", tag: "细节", d: "GL 命令在 primary CB replay 时同步发出，提交与执行合并，没有 Vulkan 那种『录制与提交分离』。" }
+              ]
+            }
+          ]
+        },
+        {
+          t: "呈现 Present", tag: "子流程", code: "DeviceAgent::present / actor->present", f: "renderer/gfx-agent/DeviceAgent.cpp",
+          d: "交换缓冲，画面上屏。",
+          c: [
+            { t: "DeviceAgent::present → actor->present", tag: "代码", code: "DeviceAgent::present", f: "renderer/gfx-agent/DeviceAgent.cpp", d: "DeviceAgent.cpp:148：入 MessageQueue，渲染线程执行。" },
+            {
+              t: "[Vulkan] CCVKDevice::present → vkQueuePresentKHR", tag: "代码", code: "vkQueuePresentKHR", f: "renderer/gfx-vulkan/VKDevice.cpp",
+              d: "VKDevice.cpp:674 → :706 vkQueuePresentKHR（经 vkCCPresentFunc，兼容 Swappy）。"
+            },
+            {
+              t: "[GLES3] GLES3Device::present → eglSwapBuffers", tag: "代码", code: "eglSwapBuffers", f: "renderer/gfx-gles3/GLES3GPUContext.cpp",
+              d: "GLES3Device.cpp:306 遍历 swapchains → GLES3GPUContext::present（GLES3GPUContext.cpp:309）→ :332 eglSwapBuffers(eglDisplay, eglSurface)。"
+            },
+            { t: "Swapchain 缓冲交换 / 等待垂直同步", tag: "细节", d: "按 present mode（FIFO/MAILBOX）交换并可选等待 VSync。" }
+          ]
+        },
+        {
+          t: "帧末收尾", tag: "子流程",
+          d: "统计与清理（回到 Engine::tick 尾段）。",
+          c: [
+            { t: "DeferredReleasePool::clear", tag: "细节", code: "DeferredReleasePool::clear", f: "engine/Engine.cpp", d: "本帧延迟释放的对象统一回收。" },
+            { t: "Profiler endFrame / 统计上屏", tag: "细节", code: "Profiler::endFrame", f: "profiler/Profiler.h", d: "汇总耗时/内存/对象数并绘制性能面板。" }
+          ]
+        }
+      ]
+    }
+  ]
+};
+
+const LEVEL_CLASS = ["lvl0","lvl1","lvl2","lvl3","lvl4","lvl5"];
+
+function countLeaves(node){
+  if(!node.c || !node.c.length) return 1;
+  return node.c.reduce((s,ch)=>s+countLeaves(ch),0);
+}
+
+function makeNode(node, level){
+  const wrap = document.createElement("div");
+  wrap.className = "node " + (LEVEL_CLASS[Math.min(level, LEVEL_CLASS.length-1)]);
+
+  const hasChildren = node.c && node.c.length;
+  const card = document.createElement("div");
+  card.className = "card" + (hasChildren ? "" : " leaf");
+
+  const toggle = document.createElement("div");
+  toggle.className = "toggle";
+  toggle.textContent = "▶";
+  card.appendChild(toggle);
+
+  const body = document.createElement("div");
+  body.className = "body";
+
+  const titleRow = document.createElement("div");
+  titleRow.className = "title-row";
+  const title = document.createElement("span");
+  title.className = "title";
+  title.textContent = node.t;
+  titleRow.appendChild(title);
+  if(node.tag){
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = node.tag;
+    titleRow.appendChild(tag);
+  }
+  if(node.code){
+    const c = document.createElement("span");
+    c.className = "code";
+    c.textContent = node.code;
+    titleRow.appendChild(c);
+  }
+  if(hasChildren){
+    const cnt = document.createElement("span");
+    cnt.className = "count";
+    cnt.textContent = "· " + node.c.length + " 项 / " + countLeaves(node) + " 叶";
+    titleRow.appendChild(cnt);
+  }
+  body.appendChild(titleRow);
+
+  if(node.d){
+    const desc = document.createElement("div");
+    desc.className = "desc";
+    desc.textContent = node.d;
+    body.appendChild(desc);
+  }
+  if(node.f){
+    const a = document.createElement("a");
+    a.className = "file";
+    a.href = ROOT + node.f;
+    a.textContent = "📄 " + node.f;
+    a.addEventListener("click", e => e.stopPropagation());
+    body.appendChild(a);
+  }
+  card.appendChild(body);
+  wrap.appendChild(card);
+
+  let childBox = null;
+  if(hasChildren){
+    childBox = document.createElement("div");
+    childBox.className = "node-children collapsed";
+    node.c.forEach(ch => childBox.appendChild(makeNode(ch, level+1)));
+    wrap.appendChild(childBox);
+
+    card.addEventListener("click", () => {
+      const collapsed = childBox.classList.toggle("collapsed");
+      card.classList.toggle("expanded", !collapsed);
+    });
+  }
+  return wrap;
+}
+
+const tree = document.getElementById("tree");
+tree.appendChild(makeNode(DATA, 0));
+
+function setAll(open){
+  document.querySelectorAll(".node-children").forEach(el => el.classList.toggle("collapsed", !open));
+  document.querySelectorAll(".card").forEach(el => {
+    if(!el.classList.contains("leaf")) el.classList.toggle("expanded", open);
+  });
+}
+function expandToDepth(maxDepth){
+  setAll(false);
+  document.querySelectorAll(".node").forEach(nodeEl => {
+    const cls = [...nodeEl.classList].find(c=>c.startsWith("lvl"));
+    const depth = cls ? parseInt(cls.slice(3)) : 0;
+    if(depth < maxDepth){
+      const cb = nodeEl.querySelector(":scope > .node-children");
+      const card = nodeEl.querySelector(":scope > .card");
+      if(cb){ cb.classList.remove("collapsed"); if(card) card.classList.add("expanded"); }
+    }
+  });
+}
+
+document.getElementById("expandAll").addEventListener("click", ()=>setAll(true));
+document.getElementById("collapseAll").addEventListener("click", ()=>{ setAll(false); });
+document.getElementById("expandTwo").addEventListener("click", ()=>expandToDepth(2));
+
+// 默认展开第一层
+expandToDepth(1);
+</script>
+</body>
+</html>

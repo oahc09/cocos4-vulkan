@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cocos Native · 引擎架构图</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#e6edf3; --muted:#9aa7b4; --accent:#58a6ff; }
+  * { box-sizing: border-box; }
+  html,body { margin:0; padding:0; background:var(--bg); color:var(--text); font-family:-apple-system,"Segoe UI","Microsoft YaHei",Roboto,Helvetica,Arial,sans-serif; line-height:1.5; }
+  header { position:sticky; top:0; z-index:20; background:linear-gradient(180deg,#0d1117 0%,rgba(13,17,23,.92) 100%); backdrop-filter:blur(6px); border-bottom:1px solid var(--border); padding:14px 22px; }
+  header h1 { margin:0; font-size:18px; letter-spacing:.5px; }
+  header p { margin:4px 0 0; font-size:12.5px; color:var(--muted); }
+  .nav { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
+  .btn { cursor:pointer; border:1px solid var(--border); background:#1c2430; color:var(--text); padding:5px 12px; border-radius:6px; font-size:12.5px; text-decoration:none; }
+  .btn:hover { border-color:var(--accent); color:var(--accent); }
+  main { padding:18px 22px 80px; max-width:1200px; margin:0 auto; }
+  .diagram { background:var(--panel); border:1px solid var(--border); border-radius:9px; padding:14px 18px; margin:16px 0; overflow-x:auto; }
+  .diagram h2 { font-size:15px; margin:0 0 4px; }
+  .diagram .sub { font-size:12px; color:var(--muted); margin:0 0 10px; }
+  .legend { display:flex; gap:16px; flex-wrap:wrap; margin:14px 0 0; font-size:12px; color:var(--muted); }
+  .legend span { display:inline-flex; align-items:center; gap:6px; }
+  .sw { width:14px; height:14px; border-radius:3px; display:inline-block; }
+  footer { text-align:center; color:var(--muted); font-size:11.5px; padding:20px; }
+  a { color:var(--accent); }
+  code { font-family:"SFMono-Regular",Consolas,monospace; font-size:11.5px; background:#0b0f14; border:1px solid var(--border); padding:1px 6px; border-radius:5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Cocos Native · 引擎架构图</h1>
+  <p>分层架构：应用/脚本 → 引擎核心 → 场景数据 → 渲染管线 → GFX 抽象（装饰器链）→ 后端实现 → 驱动/系统。需联网加载 Mermaid（CDN）。</p>
+  <div class="nav">
+    <a class="btn" href="frame-flow.html">▸ 调用链树状图</a>
+    <a class="btn" href="frame-sequence.html">▸ 时序图</a>
+  </div>
+</header>
+<main>
+  <div class="diagram">
+    <h2>分层架构总览</h2>
+    <p class="sub">自上而下贯穿一帧的调用归属；同一 GFX 接口下 Vulkan 与 GLES3 走不同最底层翻译。</p>
+    <div class="mermaid">
+flowchart TB
+    subgraph S1[应用/脚本层]
+        A1[JS/TS Game Logic]
+        A2[se::ScriptEngine / Scheduler]
+    end
+    subgraph S2[引擎核心层]
+        B1[Engine::tick / run]
+        B2[Root::frameMove<br/>Begin / Process / End]
+        B3[Scheduler]
+    end
+    subgraph S3[场景数据层]
+        C1[RenderScene]
+        C2[Camera]
+        C3[Model / SubModel]
+        C4[Light / RenderWindow]
+    end
+    subgraph S4[渲染管线层]
+        D0[RenderPipeline 基类]
+        D1[Legacy: ForwardPipeline<br/>ForwardStage / RenderQueue<br/>SceneCulling / PipelineUBO]
+        D2[Custom: NativePipeline<br/>NativeExecutorRenderGraph<br/>FrameGraph (RGDispatcher)]
+    end
+    subgraph S5[GFX 抽象层]
+        E0[gfx-base: Device / CommandBuffer<br/>Queue / Swapchain / DescriptorSet]
+        E1[装饰器链<br/>DeviceValidator 包裹 DeviceAgent]
+    end
+    subgraph S6[后端实现层]
+        F1[Vulkan: CCVKDevice<br/>CCVKCommandBuffer + Hub/Pool]
+        F2[GLES3: GLES3Device<br/>GLES3PrimaryCommandBuffer + GLGPU*/EGL]
+    end
+    subgraph S7[驱动/系统层]
+        G1[Vulkan ICD / GPU]
+        G2[EGL + GL Driver / Window]
+    end
+
+    A1 --> A2
+    A2 --> B2
+    B1 --> B2
+    B2 --> C1
+    B2 --> D0
+    C1 --> C2
+    C1 --> C3
+    C1 --> C4
+    D0 --> D1
+    D0 --> D2
+    D1 --> E0
+    D2 --> E0
+    E0 --> E1
+    E1 --> F1
+    E1 --> F2
+    F1 --> G1
+    F2 --> G2
+    </div>
+    <div class="legend">
+      <span><i class="sw" style="background:#1f6feb"></i>引擎/管线</span>
+      <span><i class="sw" style="background:#2da44e"></i>GFX 抽象</span>
+      <span><i class="sw" style="background:#bf4b8a"></i>Vulkan 后端</span>
+      <span><i class="sw" style="background:#db6d28"></i>GLES3 后端</span>
+      <span><i class="sw" style="background:#6e7681"></i>驱动/系统</span>
+    </div>
+  </div>
+  <p class="sub" style="font-size:12px;color:var(--muted)">要点：① <code>Root</code> 持有 <code>std::unique_ptr&lt;render::PipelineRuntime&gt; _pipelineRuntime</code>，render() 即调其上；② Legacy 与 Custom 两条管线共用同一套 GFX 接口，仅 <code>ForwardPipeline::render</code> 与 <code>NativeExecutorRenderGraph</code> 实现不同；③ 装饰器链顺序为 真实 Device → DeviceAgent(可分离线程) → DeviceValidator(Debug 最外层)；④ GLES3 无独立队列提交，gl* 在 primary CB replay（cmdFuncGLES3ExecuteCmds）时同步发出。坐标与调用链见 <code>frame-flow.html</code>。</p>
+</main>
+<footer>配合 <code>codebase-guide/00-overview.md · core.md · renderer.md · application.md</code> 阅读</footer>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: 'dark', securityLevel: 'loose' });
+</script>
+</body>
+</html>
