@@ -3,6 +3,7 @@
 > 审查对象：`native/cocos/renderer/gfx-vulkan/`（Cocos Native 的 Vulkan 渲染后端）
 > 方法：4 个并行源码追踪代理，逐文件定位 `file:line`；关键 P0 结论已用 grep 二次核对。
 > 配套文档：`ai-docs/codebase-guide/frame-flow.html`（调用链树）、`frame-sequence.html`、`architecture.html`。
+> 演进更新：[vulkan-evolution-improvements.md](./vulkan-evolution-improvements.md)（吸收 1.4 / Roadmap 2026 的分层改进建议，含 descriptor_heap 取代 descriptor_buffer 等关键修正）。
 
 ---
 

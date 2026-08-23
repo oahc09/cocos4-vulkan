@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Cocos 4.x 渲染模块极限参数分析（精简版）</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f2329;
+    --muted: #5c6470;
+    --line: #e3e7ed;
+    --card: #f7f9fc;
+    --accent: #2b6de8;
+    --accent-soft: #eaf1fe;
+    --hw: #c0392b;
+    --sw: #1e7e44;
+    --code-bg: #f3f4f7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    line-height: 1.7;
+    font-size: 15px;
+  }
+  header {
+    background: linear-gradient(135deg, #2b6de8 0%, #1746a8 100%);
+    color: #fff;
+    padding: 40px 28px 32px;
+  }
+  header h1 { margin: 0 0 6px; font-size: 26px; font-weight: 700; }
+  header p { margin: 0; opacity: .9; font-size: 14px; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 22px 64px; }
+  h2 {
+    margin: 40px 0 14px;
+    padding-left: 12px;
+    border-left: 4px solid var(--accent);
+    font-size: 20px;
+  }
+  h3 { margin: 24px 0 10px; font-size: 16px; color: #1746a8; }
+  p { margin: 10px 0; color: var(--fg); }
+  .muted { color: var(--muted); font-size: 13.5px; }
+  .lead {
+    background: var(--accent-soft);
+    border-radius: 10px;
+    padding: 14px 18px;
+    font-size: 14.5px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+    font-size: 13.5px;
+  }
+  th, td {
+    border: 1px solid var(--line);
+    padding: 9px 11px;
+    text-align: left;
+    vertical-align: top;
+  }
+  thead th { background: var(--card); font-weight: 600; }
+  tbody tr:nth-child(even) { background: #fafbfd; }
+  code {
+    background: var(--code-bg);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 12.5px;
+    color: #b1322b;
+  }
+  .tag {
+    display: inline-block;
+    font-size: 12px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-weight: 600;
+  }
+  .tag.hw { background: #fdecea; color: var(--hw); }
+  .tag.sw { background: #e7f5ec; color: var(--sw); }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin: 14px 0;
+  }
+  .card h3 { margin-top: 0; }
+  .src a { color: var(--accent); text-decoration: none; word-break: break-all; }
+  .src li { margin: 4px 0; }
+  ul { margin: 10px 0; padding-left: 22px; }
+  li { margin: 6px 0; }
+  .pillars { display: flex; gap: 10px; flex-wrap: wrap; margin: 8px 0 0; }
+  .pill {
+    flex: 1 1 200px;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .pill b { color: #1746a8; }
+  .note {
+    border-left: 3px solid #e6a23c;
+    background: #fff8ec;
+    padding: 10px 14px;
+    border-radius: 6px;
+    margin: 12px 0;
+    font-size: 13.5px;
+  }
+  footer { color: var(--muted); font-size: 12.5px; text-align: center; padding: 18px; }
+  .toc { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 18px; margin: 18px 0; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc ol { margin: 6px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Cocos 4.x 渲染模块极限参数分析</h1>
+  <p>骨骼动画 · BlendShape · 光源控制 · Uniform/UBO 容量（精简通俗版）</p>
+</header>
+
+<div class="wrap">
+
+  <div class="lead">
+    <p style="margin:0"><b>这份报告在说什么？</b> 它把 Cocos 4.x 引擎里四个最常"卡上限"的渲染功能——骨骼动画、面部/形变（BlendShape）、灯光、Uniform 缓冲区——的<strong>最大容量、为什么会卡、源码在哪、怎么突破</strong>讲清楚。所有结论都来自仓库源码，不是猜测。</p>
+  </div>
+
+  <div class="toc">
+    <b>目录</b>
+    <ol>
+      <li><a href="#pre">前置结论（先看这个）</a></li>
+      <li><a href="#overview">极限参数总览表</a></li>
+      <li><a href="#skeleton">① 骨骼动画</a></li>
+      <li><a href="#morph">② BlendShape 形变</a></li>
+      <li><a href="#light">③ 光源控制</a></li>
+      <li><a href="#ubo">④ Uniform / UBO 容量</a></li>
+      <li><a href="#summary">硬件限制 vs 软件限制 一句话总结</a></li>
+    </ol>
+  </div>
+
+  <h2 id="pre">前置结论（先看这个）</h2>
+  <ul>
+    <li><b>版本：</b>本仓库是 <b>Cocos Creator 4.x</b>，不是任务最初提到的 3.x。</li>
+    <li><b>后端：</b>原生渲染后端是 <code>vulkan / wgpu / metal / gles2 / gles3</code>，<b>已经没有 D3D12 后端</b>。</li>
+    <li><b>一句话原理：</b>所有上限最终都取决于设备的「能力表」<code>DeviceCaps</code>。引擎对关节 / 形变 / 灯光都用了同一招——<strong>「小容量走 GPU 快路径，超限就自动降级」</strong>，所以大多数情况下你"改个模型"就能继续用，真正的硬墙只剩显卡的显存与带宽。</li>
+  </ul>
+
+  <h2 id="overview">极限参数总览表</h2>
+  <table>
+    <thead>
+      <tr><th>模块</th><th>默认 / 推导上限</th><th>限制类型</th><th>最关键的宏 / 变量</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>骨骼动画</td>
+        <td>uniform 关节数 = <code>floor((顶点uniform向量数 − 预留)/3)</code>，<b>硬上限 256</b>；纹理通道 256 关节</td>
+        <td><span class="tag hw">硬件+软件</span></td>
+        <td><code>CC_JOINT_UNIFORM_CAPACITY</code>、<code>UBOSkinning</code></td>
+      </tr>
+      <tr>
+        <td>BlendShape</td>
+        <td>GPU 路径最多 <b>60</b> 个形变目标；超了自动改用 CPU 计算</td>
+        <td><span class="tag sw">软件</span></td>
+        <td><code>MAX_MORPH_TARGET_COUNT</code>、<code>CC_MORPH_TARGET_COUNT</code></td>
+      </tr>
+      <tr>
+        <td>光源控制</td>
+        <td>前向渲染 <b>1 灯/像素</b>，延迟/Cluster <b>10 灯/像素</b>；灯光总数无硬上限</td>
+        <td><span class="tag hw">性能受限</span></td>
+        <td><code>LIGHTS_PER_PASS</code>、<code>CC_ENABLE_CLUSTERED_LIGHT_CULLING</code></td>
+      </tr>
+      <tr>
+        <td>Uniform/UBO</td>
+        <td>单个 UBO：Vulkan 保证最小 <b>16&nbsp;KB</b>（桌面通常 64&nbsp;KB）；顶点 uniform 向量数设备相关</td>
+        <td><span class="tag hw">硬件</span></td>
+        <td><code>DeviceCaps.maxUniformBlockSize</code> 等</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- ============ 骨骼动画 ============ -->
+  <h2 id="skeleton">① 骨骼动画（Skeleton）</h2>
+
+  <h3>极限参数</h3>
+  <table>
+    <thead><tr><th>参数</th><th>默认 / 上限</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>uniform 关节容量</td><td><code>30</code>（历史兼容默认）</td><td>可被运行时覆盖</td></tr>
+      <tr><td>运行时关节数</td><td><code>floor((maxVertexUniformVectors − 保留量)/3)</code>，<b>封顶 256</b></td><td>受显卡顶点 uniform 容量约束</td></tr>
+      <tr><td>每关节占用</td><td>3 × vec4 = 48 字节</td><td>骨骼矩阵 mat3×4</td></tr>
+      <tr><td>关节纹理容量</td><td>宽 256 × 高 3 → <b>256 关节</b></td><td>超限时自动切换</td></tr>
+      <tr><td>顶点影响数</td><td>固定 <b>4</b></td><td>每顶点最多受 4 根骨骼影响</td></tr>
+    </tbody>
+  </table>
+
+  <h3>底层原理（通俗版）</h3>
+  <div class="card">
+    <p>骨骼动画要把每根骨骼的"变换矩阵"送给 GPU。有两种送法：</p>
+    <ul>
+      <li><b>塞进 Uniform（直接变量）：</b>把矩阵写进一个叫 <code>cc_joints</code> 的 uniform 数组。但顶点着色器里能用的 uniform 总量是有限的，而且这个总量被"全局相机 UBO + 阴影 UBO + 蒙皮 UBO"一起瓜分。所以骨骼越多，占的份额越大——这就是关节数的天花板来源。</li>
+      <li><b>塞进纹理（间接查表）：</b>把矩阵编码成一张浮点纹理，着色器用顶点坐标去"查表"取矩阵。这样就不占 uniform 额度了，改成受"顶点纹理单元数"和"纹理尺寸"约束。</li>
+    </ul>
+    <p>当骨骼数超过 uniform 容量时，引擎会<strong>自动从第一种切换到第二种</strong>。这就是为什么你给它一个 100 骨骼的模型，它不会报错——只是悄悄换成纹理方案。</p>
+  </div>
+
+  <h3>关键源码定位</h3>
+  <ul class="src">
+    <li>容量常量与运行时计算：<code>cocos/rendering/define.ts</code>（<code>JOINT_UNIFORM_CAPACITY</code> L600、<code>UBOSkinning</code> L651、<code>localDescriptorSetLayout_ResizeMaxJoints</code> L688）</li>
+    <li>uniform 关节推导两处：<code>cocos/root.ts:809</code> 与 <code>cocos/rendering/custom/web-program-library.ts:914</code>（两处公式略有差异）</li>
+    <li>自动降级判定：<code>cocos/3d/models/skinning-model.ts:146</code>（<code>_realTimeTextureMode = true</code>）</li>
+    <li>GLSL 采样：<code>editor/assets/chunks/builtin/uniforms/cc-skinning.chunk</code>、<code>.../functionalities/skinning-animation-lbs.chunk</code>、<code>.../skinning-animation-dqs.chunk</code></li>
+  </ul>
+
+  <h3>怎么突破</h3>
+  <ul>
+    <li><b>无需改代码：</b>超过 uniform 容量时引擎自动掉到关节纹理，最多 256 骨骼。</li>
+    <li><b>想要更多：</b>调大 <code>RealTimeJointTexture.WIDTH</code>（默认 256），并同步修改 shader 里写死的 <code>/ 256.0</code>、<code>/ 1024.0</code> 除数。</li>
+    <li><b>提高 uniform 关节数：</b>主动调 <code>localDescriptorSetLayout_ResizeMaxJoints(n)</code>，但天花板是 <code>maxVertexUniformVectors</code>，还要给全局 UBO 留空间。</li>
+    <li><b>超 256：</b>改用多张纹理 / 纹理数组 / 存储缓冲（SSBO），或对远处模型用 LOD 减骨骼。</li>
+  </ul>
+
+  <!-- ============ BlendShape ============ -->
+  <h2 id="morph">② BlendShape 形变（Morph）</h2>
+
+  <h3>极限参数</h3>
+  <table>
+    <thead><tr><th>参数</th><th>默认 / 上限</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>GPU 形变目标数</td><td><b>60</b></td><td>权重 UBO 固定 15 个 vec4 = 60 个权重</td></tr>
+      <tr><td>超过 60 个</td><td>自动回退 <b>CPU 计算</b></td><td>无硬性上限，但很慢</td></tr>
+      <tr><td>位移纹理格式</td><td><code>RGBA32F</code>（支持浮点）或 <code>RGBA8888</code>（打包）</td><td>取决于硬件</td></tr>
+      <tr><td>纹理容量</td><td>顶点数 × 目标数 ≤ <code>maxTextureSize²</code></td><td>硬件限制</td></tr>
+    </tbody>
+  </table>
+
+  <h3>底层原理（通俗版）</h3>
+  <div class="card">
+    <p>BlendShape 就是"把每个顶点的偏移量按权重叠加上去"。每个形变目标（target）的偏移量存进一张纹理，顶点着色器按 <code>顶点序号 × 目标序号</code> 去取，再乘上权重累加。</p>
+    <p>权重表的大小是固定的：只有 15 个 vec4（共 60 个浮点），所以<strong>GPU 方案最多支持 60 个形变目标</strong>。一旦超过，引擎就放弃 GPU，改在 CPU 上算好再上传——能继续用，但每帧 CPU 重算，开销随（顶点数 × 目标数）飙升。</p>
+  </div>
+  <div class="note">⚠️ <b>源码里有个"假上限"：</b><code>cc-morph.chunk</code> 写着 <code>CC_MORPH_TARGET_COUNT range([2, 8])</code>，但运行时这个宏会被设成实际的 target 数量（可达 60）。那个 <code>[2,8]</code> 是老旧的编辑器提示，不代表真实上限——别被它骗了。</div>
+
+  <h3>关键源码定位</h3>
+  <ul class="src">
+    <li>容量与路径选择：<code>cocos/rendering/define.ts</code>（<code>UBOMorphEnum</code> L694）、<code>cocos/3d/assets/morph-rendering.ts:120</code>（>60 切 CPU）</li>
+    <li>位移纹理生成：<code>cocos/3d/assets/morph-rendering.ts</code>（<code>GpuComputing</code> L232、<code>CpuComputing</code> L347、<code>createVec4TextureFactory</code> L535）</li>
+    <li>GLSL：<code>editor/assets/chunks/builtin/uniforms/cc-morph.chunk</code>、<code>.../functionalities/morph-animation.chunk</code></li>
+  </ul>
+
+  <h3>怎么突破</h3>
+  <ul>
+    <li><b>无需改代码：</b>>60 个目标自动走 CPU 路径。</li>
+    <li><b>扩大 GPU 路径到 60+：</b>三处同步改——<code>MAX_MORPH_TARGET_COUNT</code>、<code>cc_displacementWeights</code> 数组长度、以及 <code>cc-morph.chunk</code> 里 <code>cc_displacementWeights[15]</code> 的 15。</li>
+    <li><b>纹理装不下：</b>顶点数 × 目标数必须 ≤ <code>maxTextureSize²</code>；超限就拆子网格或把目标分块到多张纹理。</li>
+    <li><b>性能优化：</b>用预计算位移（<code>CC_MORPH_PRECOMPUTED</code>）把"逐目标循环"从顶点着色器移出。</li>
+  </ul>
+
+  <!-- ============ 光源 ============ -->
+  <h2 id="light">③ 光源控制（Light）</h2>
+
+  <h3>极限参数</h3>
+  <table>
+    <thead><tr><th>参数</th><th>默认 / 上限</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>前向渲染每像素灯数</td><td><b>1</b></td><td>主光 1 盏，其余灯各自多画一遍</td></tr>
+      <tr><td>延迟/Cluster 每像素灯数</td><td><b>10</b></td><td>一次算出 10 盏</td></tr>
+      <tr><td>场景灯光总数</td><td><b>无硬上限</b></td><td>视锥剔除动态收集，光越多越卡</td></tr>
+      <tr><td>主方向光</td><td><b>1</b> 个</td><td>存于 <code>UBOCamera</code></td></tr>
+      <tr><td>可投影光上限</td><td><code>maxReceived = 4</code></td><td>可配置</td></tr>
+    </tbody>
+  </table>
+
+  <h3>底层原理（通俗版）</h3>
+  <div class="card">
+    <p>前向渲染的逻辑是：先画一遍主光，然后<b>有几盏点/聚光灯，就把受影响的物体再画几遍</b>——每盏灯多一次 draw call。着色器每次只处理 1 盏灯（<code>LIGHTS_PER_PASS = 1</code>），灯光数据通过"动态 UBO"按偏移切来切去。</p>
+    <p>因此灯光<b>数量没有写死的上限</b>，但需要渲染的物体数量会随灯数线性放大，这才是真正的瓶颈。延迟/Cluster 渲染则一次处理 10 盏（<code>LIGHTS_PER_PASS = 10</code>），draw 次数少很多。</p>
+  </div>
+
+  <h3>关键源码定位</h3>
+  <ul class="src">
+    <li>灯光 UBO 与每 pass 灯数：<code>cocos/rendering/define.ts</code>（<code>UBOForwardLightEnum</code> L549、<code>UBODeferredLight</code> L596）</li>
+    <li>叠加光队列：<code>cocos/rendering/render-additive-light-queue.ts</code>（<code>_lightBufferCount</code> L123、<code>_updateUBOs</code> L478）</li>
+    <li>灯光收集：<code>cocos/rendering/scene-culling.ts:53</code></li>
+    <li>阴影上限：<code>cocos/render-scene/scene/shadows.ts:330</code>、<code>cocos/scene-graph/scene-globals.ts:999</code></li>
+    <li>GLSL：<code>editor/assets/chunks/builtin/uniforms/cc-forward-light.chunk</code></li>
+  </ul>
+
+  <h3>怎么突破</h3>
+  <ul>
+    <li><b>减少 draw 数：</b>换用延迟/Cluster 管线（<code>LIGHTS_PER_PASS = 10</code>）。</li>
+    <li><b>前向下优化：</b>缩小每光 UBO 对齐浪费、关闭不必要的阴影、把静态光烘进 lightmap。</li>
+    <li><b>更多投影光：</b>调大 <code>ShadowsInfo.maxReceived</code>（代价：阴影贴图内存与带宽线性增长）。</li>
+    <li><b>海量动态光：</b>开启 Cluster 光剔除（<code>CC_ENABLE_CLUSTERED_LIGHT_CULLING</code>）替代逐光 forward-add。</li>
+  </ul>
+
+  <!-- ============ UBO ============ -->
+  <h2 id="ubo">④ Uniform / UBO 容量</h2>
+
+  <h3>极限参数（设备能力表 DeviceCaps）</h3>
+  <table>
+    <thead><tr><th>能力项</th><th>典型值 / 保证最小值</th><th>类型</th></tr></thead>
+    <tbody>
+      <tr><td><code>maxVertexUniformVectors</code></td><td>Vulkan: <code>maxUniformBufferRange / 16</code>；GLES3 最小 256；桌面 4096</td><td>硬件</td></tr>
+      <tr><td><code>maxUniformBlockSize</code></td><td>Vulkan: <code>maxUniformBufferRange</code>（<b>最小 16&nbsp;KB</b>，桌面常 64&nbsp;KB）</td><td>硬件</td></tr>
+      <tr><td><code>maxUniformBufferBindings</code></td><td>WebGL1 写死 16；WebGPU 12</td><td>硬件</td></tr>
+      <tr><td><code>uboOffsetAlignment</code></td><td>Vulkan <code>minUniformBufferOffsetAlignment</code>（常见 256&nbsp;B）</td><td>硬件</td></tr>
+      <tr><td><code>maxVertexTextureUnits</code></td><td>GLES3 最小 16</td><td>硬件</td></tr>
+    </tbody>
+  </table>
+
+  <h3>底层原理（通俗版）</h3>
+  <div class="card">
+    <p>GPU 给"全局变量（uniform）"留的内存很小——单个 UBO 在 Vulkan 下最少只有 16&nbsp;KB，桌面显卡通常 64&nbsp;KB。引擎把所有渲染数据（相机、光照、阴影、骨骼……）塞进几块 UBO，再通过三组 Descriptor Set（GLOBAL / MATERIAL / LOCAL）组织。</p>
+    <p>关键连锁反应：<strong>顶点着色器里的 uniform 总量 = 全局 UBO + 本地 UBO 共享</strong>。所以骨骼想多用一点 uniform，就得压缩其它 UBO 的空间——这就是为什么架构上把大数据（骨骼、形变、海量灯）尽量搬去纹理或存储缓冲（SSBO）。</p>
+  </div>
+
+  <h3>引擎内置 UBO 尺寸清单</h3>
+  <table>
+    <thead><tr><th>UBO</th><th>构成</th><th>尺寸</th></tr></thead>
+    <tbody>
+      <tr><td>UBOGlobal</td><td>5 × vec4</td><td>80 B</td></tr>
+      <tr><td>UBOCamera</td><td>6 × mat4 + 13 × vec4</td><td>592 B</td></tr>
+      <tr><td>UBOShadow</td><td>2 × mat4 + 8 × vec4</td><td>256 B</td></tr>
+      <tr><td>UBOCSM</td><td>4 级级联阴影</td><td>656 B</td></tr>
+      <tr><td>UBOLocal</td><td>2 × mat4 + 6 × vec4</td><td>224 B</td></tr>
+      <tr><td>UBOSkinning</td><td>关节数 × 3 vec4</td><td>默认 1440 B（最大 12.3&nbsp;KB）</td></tr>
+      <tr><td>UBOMorph</td><td>15 vec4 权重 + 1 信息</td><td>256 B</td></tr>
+      <tr><td>UBOForwardLight</td><td>5 × vec4 / 灯</td><td>80 B / 灯</td></tr>
+    </tbody>
+  </table>
+
+  <h3>关键源码定位</h3>
+  <ul class="src">
+    <li>能力表定义：<code>cocos/gfx/base/define.ts</code>（<code>DeviceCaps</code> L747）</li>
+    <li>Vulkan 映射：<code>native/cocos/renderer/gfx-vulkan/VKDevice.cpp:311-326</code></li>
+    <li>WebGL2 映射与 iOS 修正：<code>cocos/gfx/webgl2/webgl2-device.ts:173-195</code></li>
+  </ul>
+
+  <h3>怎么突破</h3>
+  <ul>
+    <li><b>对齐优化：</b><code>uboOffsetAlignment</code> 常是 256&nbsp;B，动态 UBO（如灯光缓冲）按对齐后的 stride 分配，避免浪费。</li>
+    <li><b>大数据搬出 uniform：</b>骨骼、形变、Cluster 灯光改用<strong>纹理</strong>或<strong>存储缓冲 SSBO</strong>（上限达 128&nbsp;MB 级），绕开 16~64&nbsp;KB 的 UBO 限制。</li>
+    <li><b>精简全局 UBO：</b>减少全局成员，为蒙皮 UBO 腾出顶点 uniform 预算。</li>
+    <li><b>移动端兜底：</b>尊重引擎对 iOS/微信浏览器 256/512 顶点 uniform 的 clamp，必要时主动降级到关节纹理。</li>
+  </ul>
+
+  <!-- ============ 总结 ============ -->
+  <h2 id="summary">硬件限制 vs 软件限制 · 一句话总结</h2>
+  <table>
+    <thead><tr><th>模块</th><th>硬性硬件限制</th><th>软件逻辑限制</th></tr></thead>
+    <tbody>
+      <tr><td>骨骼动画</td><td>顶点 uniform 向量数、顶点纹理单元、纹理尺寸</td><td>uniform 关节数（256 封顶）、纹理宽 256、顶点影响 4</td></tr>
+      <tr><td>BlendShape</td><td>纹理尺寸、浮点纹理支持</td><td>GPU 60 目标、权重数组 15 vec4</td></tr>
+      <tr><td>光源</td><td>每帧带宽（draw 数）、阴影贴图内存</td><td>前向 1 灯/pass、延迟 10 灯/pass、<code>maxReceived=4</code></td></tr>
+      <tr><td>Uniform/UBO</td><td>UBO 16~64&nbsp;KB、绑定数、对齐 256&nbsp;B</td><td>Descriptor Set 布局、各 UBO 固定成员</td></tr>
+    </tbody>
+  </table>
+
+  <div class="lead">
+    <p style="margin:0"><b>一句话记住：</b> 关节超限 → 切纹理；形变超 60 → 切 CPU；灯光太多 → 用 Cluster 把多灯合一趟；而所有这些的"真正天花板"只有三样东西——显卡的 <b>uniform 字节数</b>、<b>纹理尺寸</b> 和 <b>带宽</b>。</p>
+  </div>
+
+  <footer>
+    分析基于 <code>cocos4-vulkan</code> 仓库源码（Cocos Creator 4.x）· 配套 Markdown 版见 <code>ai-docs/to-do/rendering-limit-params-analysis.md</code>
+  </footer>
+</div>
+</body>
+</html>
