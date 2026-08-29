@@ -4,7 +4,12 @@ title: DeviceCaps 硬件能力表
 category: 全局硬件能力
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/gfx/base/define.ts:747, cocos/gfx/webgl2/webgl2-device.ts:171, native/cocos/renderer/gfx-vulkan/VKDevice.cpp:311, cocos/gfx/webgpu/webgpu-device.ts:547]
+layer: L1
+domain: rendering
+module: gfx
+breakable: false
+tags: [devicecaps, hardware, limits]
+sources: [cocos/gfx/base/define.ts:747, cocos/gfx/webgl2/webgl2-device.ts:171, native/cocos/renderer/gfx-vulkan/VKDevice.cpp:311, cocos/gfx/webgpu/webgpu-device.ts:547, gfx-vulkan/VKDevice.cpp:311, webgl2-device.ts:178, cocos/gfx/base/device.ts:420]
 ---
 
 # DeviceCaps 硬件能力表

@@ -1,9 +1,14 @@
 ---
 id: kb-terrain
-title: 地形 Terrain 规格标准
-category: 场景 / 地形
+title: 地形 Terrain
+category: 3D 渲染模块
 engine: Cocos Creator 4.x
 updated: 2026-08-22
+layer: L2
+domain: rendering
+module: terrain
+breakable: true
+tags: [terrain, TERRAIN_MAX_LAYER_COUNT]
 sources: [cocos/terrain/terrain-asset.ts:30, cocos/terrain/terrain.ts:1265, cocos/terrain/terrain-asset.ts:TERRAIN_MAX_BLEND_LAYERS]
 ---
 

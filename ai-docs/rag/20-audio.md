@@ -1,10 +1,15 @@
 ---
 id: kb-audio
-title: 音频 Audio 规格标准
-category: 音频
+title: 音频 Audio
+category: 场景与系统
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/audio/audio-source.ts, cocos/audio/index.ts:27]
+layer: L3
+domain: audio
+module: audio
+breakable: false
+tags: [audio, voice, platform]
+sources: [cocos/audio/audio-source.ts, cocos/audio/index.ts:27, audio/index.ts:27]
 ---
 
 # 音频 Audio 规格标准

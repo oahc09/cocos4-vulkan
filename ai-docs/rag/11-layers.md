@@ -1,10 +1,15 @@
 ---
 id: kb-layers
-title: 节点层级 Layers 规格标准
-category: 场景 / 层级
+title: 节点层级 Layers
+category: 场景与系统
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/scene-graph/layers.ts:33, cocos/scene-graph/layers.ts:34, cocos/scene-graph/layers.ts:66]
+layer: L2
+domain: scene
+module: layers
+breakable: false
+tags: [layers, bitmask, uint32]
+sources: [cocos/scene-graph/layers.ts:33, cocos/scene-graph/layers.ts:34, cocos/scene-graph/layers.ts:66, layers.ts:45, cocos/scene-graph/layers.ts:72]
 ---
 
 # 节点层级 Layers 规格标准

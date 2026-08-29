@@ -1,10 +1,15 @@
 ---
 id: kb-vertex-index
-title: 顶点 / 索引 / 属性规格标准
-category: 渲染 / 几何
+title: 顶点与索引缓冲
+category: 渲染与着色器
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/core/platform/macro.ts:1073, cocos/3d/assets/mesh.ts:511, cocos/2d/renderer/render-data.ts:637, cocos/2d/assembler/graphics/webgl/graphics-assembler.ts:34, cocos/scene-graph/layers.ts:33]
+layer: L1
+domain: rendering
+module: geometry
+breakable: false
+tags: [vertex, index, uint16, uint32]
+sources: [cocos/core/platform/macro.ts:1073, cocos/3d/assets/mesh.ts:511, cocos/2d/renderer/render-data.ts:637, cocos/2d/assembler/graphics/webgl/graphics-assembler.ts:34, cocos/scene-graph/layers.ts:33, graphics-assembler.ts:35, cocos/gfx/base/define.ts:751]
 ---
 
 # 顶点 / 索引 / 属性规格标准

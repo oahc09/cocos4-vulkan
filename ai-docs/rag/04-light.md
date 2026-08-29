@@ -1,10 +1,15 @@
 ---
 id: kb-light
-title: 光源控制 Light 规格标准
-category: 渲染 / 光照
+title: 光源与光照 Light
+category: 3D 渲染模块
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/rendering/define.ts:549, cocos/rendering/render-additive-light-queue.ts:478, cocos/rendering/scene-culling.ts:53, cocos/render-scene/scene/shadows.ts:330, editor/assets/chunks/builtin/uniforms/cc-forward-light.chunk]
+layer: L2
+domain: rendering
+module: light
+breakable: true
+tags: [light, forward, deferred, LIGHTS_PER_PASS]
+sources: [cocos/rendering/define.ts:549, cocos/rendering/render-additive-light-queue.ts:478, cocos/rendering/scene-culling.ts:53, cocos/render-scene/scene/shadows.ts:330, editor/assets/chunks/builtin/uniforms/cc-forward-light.chunk, cc-forward-light.chunk:3, define.ts:577, render-additive-light-queue.ts:123, define.ts:289, cocos/rendering/custom/define.ts:70, cocos/scene-graph/scene-globals.ts:999]
 ---
 
 # 光源控制 Light 规格标准

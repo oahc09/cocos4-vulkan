@@ -1,10 +1,15 @@
 ---
 id: kb-shadow
-title: 阴影 Shadow 规格标准
-category: 渲染 / 阴影
+title: 阴影 Shadow
+category: 3D 渲染模块
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/render-scene/scene/shadows.ts:73, cocos/render-scene/scene/shadows.ts:330, cocos/rendering/define.ts:355, cocos/scene-graph/scene-globals.ts:999]
+layer: L2
+domain: rendering
+module: shadow
+breakable: true
+tags: [shadow, CSM, maxReceived]
+sources: [cocos/render-scene/scene/shadows.ts:73, cocos/render-scene/scene/shadows.ts:330, cocos/rendering/define.ts:355, cocos/scene-graph/scene-globals.ts:999, define.ts:356, cocos/render-scene/scene/shadows.ts:376]
 ---
 
 # 阴影 Shadow 规格标准

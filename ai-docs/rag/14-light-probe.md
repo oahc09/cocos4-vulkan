@@ -1,10 +1,15 @@
 ---
 id: kb-light-probe
-title: 光照探针 / GI 规格标准
-category: 渲染 / 全局光照
+title: 光照探针 / GI
+category: 3D 渲染模块
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/native-binding/decorators.ts:526, cocos/native-binding/decorators.ts:530, cocos/native-binding/decorators.ts:546, cocos/native-binding/decorators.ts:547]
+layer: L2
+domain: rendering
+module: gi
+breakable: true
+tags: [gi, lightprobe, giSamples]
+sources: [cocos/native-binding/decorators.ts:526, cocos/native-binding/decorators.ts:530, cocos/native-binding/decorators.ts:546, cocos/native-binding/decorators.ts:547, decorators.ts:521, decorators.ts:535, decorators.ts:904, decorators.ts:565, cocos/native-binding/decorators.ts:503, cocos/native-binding/decorators.ts:557]
 ---
 
 # 光照探针 / GI 规格标准

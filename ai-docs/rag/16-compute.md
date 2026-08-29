@@ -1,10 +1,15 @@
 ---
 id: kb-compute
-title: 计算着色器 Compute 规格标准
-category: 渲染 / 计算
+title: 计算着色器 Compute
+category: 渲染与着色器
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/gfx/base/define.ts:767, native/cocos/renderer/gfx-vulkan/VKDevice.cpp:311, cocos/gfx/webgpu/webgpu-device.ts:547]
+layer: L1
+domain: rendering
+module: compute
+breakable: false
+tags: [compute, workgroup, shared-memory]
+sources: [cocos/gfx/base/define.ts:767, native/cocos/renderer/gfx-vulkan/VKDevice.cpp:311, cocos/gfx/webgpu/webgpu-device.ts:547, cocos/gfx/base/define.ts:709]
 ---
 
 # 计算着色器 Compute 规格标准

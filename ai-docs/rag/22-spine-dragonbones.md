@@ -1,3 +1,16 @@
+---
+id: kb-spine-dragonbones
+title: Spine / DragonBones 骨骼动画
+category: 2D 与 UI
+engine: Cocos Creator 4.x
+updated: 2026-08-29
+layer: L2
+domain: animation
+module: spine
+breakable: true
+tags: [spine, dragonbones, cache-mode, 2d]
+sources: [cocos/spine/skeleton.ts:70, cocos/spine/skeleton-cache.ts:33, cocos/dragon-bones/ArmatureDisplay.ts:58, cocos/2d/renderer/mesh-buffer.ts:257, skeleton-cache.ts:312]
+---
 # 22 · Spine / DragonBones 骨骼动画（2D 骨架系统）
 
 ## 概述

@@ -1,10 +1,15 @@
 ---
 id: kb-animation
-title: 动画层 Animation 规格标准
-category: 动画 / 状态机
+title: 动画层 Animation
+category: 动画与骨架
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/3d/skeletal-animation/limits.ts:26, cocos/animation/marionette/graph-eval.ts:62]
+layer: L2
+domain: animation
+module: animation
+breakable: true
+tags: [animation, MAX_ANIMATION_LAYER]
+sources: [cocos/3d/skeletal-animation/limits.ts:26, cocos/animation/marionette/graph-eval.ts:62, cocos/animation/marionette/graph-eval.ts:31]
 ---
 
 # 动画层 Animation 规格标准

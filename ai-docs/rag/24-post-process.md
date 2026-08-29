@@ -1,3 +1,16 @@
+---
+id: kb-post-process
+title: 后处理 PostProcess
+category: 渲染与着色器
+engine: Cocos Creator 4.x
+updated: 2026-08-29
+layer: L2
+domain: rendering
+module: postprocess
+breakable: true
+tags: [postprocess, bloom, shadingScale]
+sources: [post-process.ts:47, post-process.ts:28, cocos/rendering/post-process/components/post-process.ts:7, cocos/rendering/post-process/passes/bloom-pass.ts:12, cocos/rendering/post-process/post-process-builder.ts:27]
+---
 # 24 · 后处理 PostProcess
 
 ## 概述

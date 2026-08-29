@@ -1,10 +1,15 @@
 ---
 id: kb-asset-loading
-title: 资源加载并发规格标准
-category: 资源 / 加载
+title: 资源加载并发
+category: 资源与管线
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/asset/asset-manager/downloader.ts:161, cocos/asset/asset-manager/downloader.ts:171, cocos/asset/asset-manager/asset-manager.ts:511, cocos/asset/asset-manager/shared.ts:71]
+layer: L2
+domain: asset
+module: asset-manager
+breakable: true
+tags: [asset, loading, maxConcurrency]
+sources: [cocos/asset/asset-manager/downloader.ts:161, cocos/asset/asset-manager/downloader.ts:171, cocos/asset/asset-manager/asset-manager.ts:511, cocos/asset/asset-manager/shared.ts:71, downloader.ts:503, cocos/asset/asset-manager/downloader.ts:424]
 ---
 
 # 资源加载并发规格标准

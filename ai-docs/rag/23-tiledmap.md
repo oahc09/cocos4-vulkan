@@ -1,3 +1,16 @@
+---
+id: kb-tiledmap
+title: TiledMap 瓦片地图
+category: 2D 与 UI
+engine: Cocos Creator 4.x
+updated: 2026-08-29
+layer: L3
+domain: ui
+module: tiledmap
+breakable: true
+tags: [tiledmap, tmx, layer]
+sources: [assembler/simple.ts:74, tiled-types.ts:102, cocos/tiledmap/tiled-layer.ts:432, cocos/tiledmap/tiled-types.ts:98, cocos/2d/renderer/mesh-buffer.ts:257]
+---
 # 23 · TiledMap 瓦片地图
 
 ## 概述

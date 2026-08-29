@@ -1,10 +1,15 @@
 ---
 id: kb-texture-material-pass
-title: 纹理 / 材质 / Pass / RT 规格标准
-category: 渲染 / 资源与管线
+title: 纹理 / 材质 / Pass / RT
+category: 渲染与着色器
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/render-scene/scene/submodel.ts:37, cocos/gfx/base/define.ts:757, native/cocos/renderer/gfx-vulkan/VKDevice.cpp:321, cocos/gfx/webgl2/webgl2-device.ts:191, cocos/asset/assets/material.ts:175]
+layer: L2
+domain: rendering
+module: material
+breakable: true
+tags: [texture, material, pass, MAX_PASS_COUNT]
+sources: [cocos/render-scene/scene/submodel.ts:37, cocos/gfx/base/define.ts:757, native/cocos/renderer/gfx-vulkan/VKDevice.cpp:321, cocos/gfx/webgl2/webgl2-device.ts:191, cocos/asset/assets/material.ts:175, device.ts:420, cocos/gfx/webgl2/webgl2-commands.ts:931]
 ---
 
 # 纹理 / 材质 / Pass / RT 规格标准

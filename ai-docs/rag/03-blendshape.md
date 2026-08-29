@@ -1,10 +1,15 @@
 ---
 id: kb-blendshape
-title: BlendShape / Morph 规格标准
-category: 渲染 / 形变
+title: BlendShape 形变动画
+category: 3D 渲染模块
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/rendering/define.ts:694, cocos/3d/assets/morph-rendering.ts:120, cocos/3d/models/morph-model.ts, editor/assets/chunks/builtin/uniforms/cc-morph.chunk]
+layer: L2
+domain: rendering
+module: morph
+breakable: true
+tags: [blendshape, morph, MAX_MORPH_TARGET_COUNT]
+sources: [cocos/rendering/define.ts:694, cocos/3d/assets/morph-rendering.ts:120, cocos/3d/models/morph-model.ts, editor/assets/chunks/builtin/uniforms/cc-morph.chunk, morph-animation.chunk:62, cc-morph.chunk:6, morph-rendering.ts:535, cc-morph.chunk:3, morph-rendering.ts:159]
 ---
 
 # BlendShape / Morph 规格标准

@@ -1,9 +1,14 @@
 ---
 id: kb-input-touch
-title: 输入 / 触摸规格标准
-category: 输入
+title: 输入与触摸
+category: 场景与系统
 engine: Cocos Creator 4.x
 updated: 2026-08-22
+layer: L2
+domain: input
+module: touch
+breakable: false
+tags: [input, touch, MAX_TOUCHES]
 sources: [cocos/input/types/event/event-touch.ts:45]
 ---
 

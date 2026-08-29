@@ -1,9 +1,14 @@
 ---
 id: kb-varyings
-title: Shader 插值器 Varyings 规格标准
-category: 渲染 / Shader
+title: Shader Varyings 插值器
+category: 渲染与着色器
 engine: Cocos Creator 4.x
 updated: 2026-08-22
+layer: L1
+domain: rendering
+module: varyings
+breakable: false
+tags: [varyings, MAX_VARYING_VECTORS, shader]
 sources: [cocos/gfx/gl-constants.ts:88, cocos/gfx/gl-constants.ts:234, cocos/gfx/gl-constants.ts:401, cocos/gfx/base/define.ts:747]
 ---
 

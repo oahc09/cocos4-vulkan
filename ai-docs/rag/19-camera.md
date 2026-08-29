@@ -1,10 +1,15 @@
 ---
 id: kb-camera
-title: 摄像机 Camera 规格标准
-category: 渲染 / 场景
+title: 摄像机 Camera
+category: 场景与系统
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/render-scene/core/render-scene.ts:157, cocos/render-scene/core/render-window.ts:148]
+layer: L3
+domain: scene
+module: camera
+breakable: true
+tags: [camera, render]
+sources: [cocos/render-scene/core/render-scene.ts:157, cocos/render-scene/core/render-window.ts:148, cocos/render-scene/core/render-scene.ts:265, cocos/render-scene/core/render-window.ts:350]
 ---
 
 # 摄像机 Camera 规格标准

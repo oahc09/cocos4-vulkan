@@ -1,10 +1,15 @@
 ---
 id: kb-particle
-title: 粒子系统 Particle 规格标准
-category: 渲染 / 粒子
+title: 粒子系统 Particle
+category: 3D 渲染模块
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/particle/particle-system.ts:78, cocos/particle/particle-system.ts:803, cocos/particle/renderer/particle-system-renderer-cpu.ts, cocos/particle/renderer/particle-system-renderer-gpu.ts]
+layer: L3
+domain: rendering
+module: particle
+breakable: true
+tags: [particle, capacity, emitter]
+sources: [cocos/particle/particle-system.ts:78, cocos/particle/particle-system.ts:803, cocos/particle/renderer/particle-system-renderer-cpu.ts, cocos/particle/renderer/particle-system-renderer-gpu.ts, cocos/particle/particle-system.ts:84]
 ---
 
 # 粒子系统 Particle 规格标准

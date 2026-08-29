@@ -3,7 +3,8 @@
 > 从 Cocos Creator 4.x 引擎源码中提炼「渲染 / 场景」相关模块的**极限参数、底层限制机制、源码定位与突破方案**，供检索增强（RAG）与日常查阅。
 
 - 📌 **综合整合视图（先读这份）**：[00-integrated-overview.md](./00-integrated-overview.md) — 分层体系、真正不可突破的天花板、分类速查、交叉约束图。
-- 📑 **分主题条目**：下方 01–24，逐条标注 `文件:行号`，适合切片检索。
+- 📑 **分主题条目**：下方 01–30，逐条标注 `文件:行号`，适合切片检索。
+- 🤖 **机器可读索引**：[index.json](./index.json) / [index.csv](./index.csv) — 由 `build-index.js` 生成，供向量库直接导入。
 
 ## 版本与后端事实（分析前提）
 
@@ -42,6 +43,12 @@
 | [22](./22-spine-dragonbones.md) | Spine / DragonBones（2D 骨架） | 无 bone/slot 引擎常量上限；2D 顶点硬上限 `2^32`/`65536` |
 | [23](./23-tiledmap.md) | TiledMap 瓦片地图 | 无层数/瓦片引擎常量上限；逐层独立 draw；`LAYER=2` 为 TMX 枚举非层级上限 |
 | [24](./24-post-process.md) | 后处理 PostProcess | 特效数无 `MAX_` 上限；Bloom 滤波级数 **6**；`shadingScale` ∈ [0.01,4] |
+| [25](./25-gpu-instancing.md) | GPU Instancing 实例化 | 单批 **`MAX_CAPACITY = 1024`**（初始 32、翻倍扩容，超限自动拆批） |
+| [26](./26-physics.md) | 物理系统 Physics | `fixedTimeStep=1/60`、`maxSubSteps=1`、碰撞矩阵 **32×32**；无刚体数上限 |
+| [27](./27-reflection-probe.md) | 反射探针 ReflectionProbe | `CUBE` / `PLANAR` 两类；数量无硬上限（显存与重绘开销约束） |
+| [28](./28-dynamic-atlas.md) | 2D 动态合图 Dynamic Atlas | `maxAtlasCount=5`、`textureSize=2048`、`maxFrameSize=512` |
+| [29](./29-video-webview.md) | 视频 / WebView | VideoPlayer 仅支持 **Web / iOS / Android**；数量无引擎上限 |
+| [30](./30-shader-variant.md) | Shader 变体与 Program 库 | 变体数无硬上限，宏组合呈 **2^N 爆炸**（编译卡顿 / 内存增长） |
 
 ## 条目统一结构
 
@@ -65,3 +72,15 @@
 - 所有数值均来自本仓库当前源码快照，标注 `文件:行号` 以便回溯。
 - 引擎升级后，优先复核 `DeviceCaps`（`define.ts:747`）与各 `MAX_*` 常量。
 - 新增条目请复用本 README 的 6 段式结构与索引表。
+
+### 元数据与索引工具
+
+每篇条目头部均为统一 YAML frontmatter（`id` / `title` / `category` / `layer` / `domain` / `module` / `breakable` / `tags` / `sources`），由 [`build-index.js`](./build-index.js) 维护：
+
+```bash
+node ai-docs/rag/build-index.js   # 幂等：统一 frontmatter + 生成 index.json / index.csv
+```
+
+新增条目时：① 按 6 段式写 `.md`；② 在 `build-index.js` 的 `META` 表补一行元数据；③ 重跑脚本；④ 在本 README 索引表追加一行。
+
+分层约定：`L1` 硬件能力（不可改）｜`L2` 软件常量（改引擎可调）｜`L3` 性能 / 平台约束（优化为主）。当前分布：**L1 = 7、L2 = 17、L3 = 7**。

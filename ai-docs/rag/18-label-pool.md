@@ -1,10 +1,15 @@
 ---
 id: kb-label-pool
-title: 文本 Label 画布池规格标准
-category: 2D / UI
+title: Label 画布池
+category: 2D 与 UI
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/core/platform/macro.ts:1134, cocos/2d/assembler/label/font-utils.ts:70]
+layer: L2
+domain: ui
+module: label
+breakable: true
+tags: [label, pool, MAX_LABEL_CANVAS_POOL_SIZE]
+sources: [cocos/core/platform/macro.ts:1134, cocos/2d/assembler/label/font-utils.ts:70, cocos/core/platform/macro.ts:1050]
 ---
 
 # 文本 Label 画布池规格标准

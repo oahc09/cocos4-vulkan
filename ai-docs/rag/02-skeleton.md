@@ -1,10 +1,15 @@
 ---
 id: kb-skeleton
-title: 骨骼动画 Skeleton 规格标准
-category: 渲染 / 蒙皮
+title: 骨骼动画 Skeleton
+category: 3D 渲染模块
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/rendering/define.ts:600, cocos/3d/models/skinning-model.ts:139, cocos/root.ts:809, cocos/rendering/custom/web-program-library.ts:914, editor/assets/chunks/builtin/uniforms/cc-skinning.chunk]
+layer: L2
+domain: rendering
+module: skeleton
+breakable: true
+tags: [skeleton, skinning, joint, CC_JOINT_UNIFORM_CAPACITY]
+sources: [cocos/rendering/define.ts:600, cocos/3d/models/skinning-model.ts:139, cocos/root.ts:809, cocos/rendering/custom/web-program-library.ts:914, editor/assets/chunks/builtin/uniforms/cc-skinning.chunk, cc-skinning.chunk:39, skinning-animation-lbs.chunk:45]
 ---
 
 # 骨骼动画 Skeleton 规格标准

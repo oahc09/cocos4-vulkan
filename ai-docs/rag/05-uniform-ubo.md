@@ -1,10 +1,15 @@
 ---
 id: kb-uniform-ubo
-title: Uniform / UBO 容量规格标准
-category: 渲染 / 资源绑定
+title: Uniform 与 UBO 容量
+category: 渲染与着色器
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/gfx/base/define.ts:747, native/cocos/renderer/gfx-vulkan/VKDevice.cpp:313, cocos/gfx/webgl2/webgl2-device.ts:173, cocos/rendering/define.ts:171]
+layer: L1
+domain: rendering
+module: ubo
+breakable: false
+tags: [uniform, ubo, maxUniformBlockSize]
+sources: [cocos/gfx/base/define.ts:747, native/cocos/renderer/gfx-vulkan/VKDevice.cpp:313, cocos/gfx/webgl2/webgl2-device.ts:173, cocos/rendering/define.ts:171, webgpu-device.ts:547, native/cocos/renderer/gfx-vulkan/VKDevice.cpp:311]
 ---
 
 # Uniform / UBO 容量规格标准

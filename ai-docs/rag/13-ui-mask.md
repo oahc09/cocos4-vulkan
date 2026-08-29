@@ -1,10 +1,15 @@
 ---
 id: kb-ui-mask
-title: UI 遮罩嵌套 / 2D 合批规格标准
-category: 2D / UI
+title: UI 遮罩嵌套
+category: 2D 与 UI
 engine: Cocos Creator 4.x
 updated: 2026-08-22
-sources: [cocos/2d/renderer/stencil-manager.ts:92, cocos/2d/renderer/stencil-manager.ts:183, cocos/2d/renderer/stencil-manager.ts:192]
+layer: L1
+domain: ui
+module: mask
+breakable: false
+tags: [mask, stencil, ui]
+sources: [cocos/2d/renderer/stencil-manager.ts:92, cocos/2d/renderer/stencil-manager.ts:183, cocos/2d/renderer/stencil-manager.ts:192, cocos/2d/renderer/stencil-manager.ts:137, cocos/2d/renderer/stencil-manager.ts:209]
 ---
 
 # UI 遮罩嵌套 / 2D 合批规格标准
