@@ -61,6 +61,7 @@ void CCVKTexture::createTexture(uint32_t width, uint32_t height, uint32_t size, 
 
     if (_swapchain != nullptr) {
         _gpuTexture->swapchain = static_cast<CCVKSwapchain *>(_swapchain)->gpuSwapchain();
+        _gpuTexture->swapchainGeneration = _gpuTexture->swapchain->imageGeneration;
         _gpuTexture->memoryAllocated = false;
     }
 

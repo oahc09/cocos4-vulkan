@@ -42,8 +42,8 @@ public:
     void compressInputLocations(gfx::AttributeList &attributes);
 
     inline uint32_t *getOutputData() {
-        _shader.reset();
         _program.reset();
+        _shader.reset();
         return _output.data();
     }
 

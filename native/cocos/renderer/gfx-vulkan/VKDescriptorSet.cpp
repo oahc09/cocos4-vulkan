@@ -95,6 +95,10 @@ void CCVKDescriptorSet::doInit(const DescriptorSetInfo & /*info*/) {
     for (uint32_t t = 0U; t < gpuDevice->backBufferCount; ++t) {
         CCVKGPUDescriptorSet::Instance &instance = _gpuDescriptorSet->instances[t];
         instance.vkDescriptorSet = gpuDevice->getDescriptorSetPool(_gpuDescriptorSet->layoutID)->request();
+        instance.version = ccnew CCVKGPUDescriptorVersion;
+        instance.version->vkDescriptorSet = instance.vkDescriptorSet;
+        instance.version->layoutID = _gpuDescriptorSet->layoutID;
+        instance.version->gpuLayout = gpuDescriptorSetLayout;
         instance.descriptorInfos.resize(descriptorCount, {});
 
         for (uint32_t i = 0U, k = 0U; i < bindingCount; ++i) {
@@ -224,6 +228,13 @@ void CCVKDescriptorSet::forceUpdate() {
     update();
 }
 
+void CCVKGPUDescriptorVersion::shutdown() {
+    if (vkDescriptorSet) {
+        CCVKDevice::getInstance()->gpuRecycleBin()->collect(layoutID, vkDescriptorSet);
+        vkDescriptorSet = VK_NULL_HANDLE;
+    }
+}
+
 void CCVKGPUDescriptorSet::shutdown() {
     CCVKDevice *device = CCVKDevice::getInstance();
     CCVKGPUDescriptorHub *descriptorHub = CCVKDevice::getInstance()->gpuDescriptorHub();
@@ -247,9 +258,9 @@ void CCVKGPUDescriptorSet::shutdown() {
             }
         }
 
-        if (instance.vkDescriptorSet) {
-            device->gpuRecycleBin()->collect(layoutID, instance.vkDescriptorSet);
-        }
+        // A detached version can outlive this facade through recording leases.
+        instance.version = nullptr;
+        instance.vkDescriptorSet = VK_NULL_HANDLE;
     }
 
     CCVKDevice::getInstance()->gpuDescriptorSetHub()->erase(this);

@@ -255,6 +255,9 @@ if(USE_XR)
 endif()
 
 include(${EXTERNAL_ROOT}/CMakeLists.txt)
+if(CC_USE_VULKAN)
+    include(${CWD}/cmake/vulkan-dependencies.cmake)
+endif()
 
 ##### audio
 if(USE_AUDIO)
@@ -3516,8 +3519,27 @@ endif()
 
 if(CC_USE_VULKAN)
 
+    option(CC_VULKAN_VALIDATION "Enable Vulkan validation in development builds" ON)
+    option(CC_VULKAN_PIPELINE_CACHE "Persist validated Vulkan pipeline cache data" OFF)
+    target_compile_definitions(${ENGINE_NAME} PUBLIC
+        CC_VULKAN_PIPELINE_CACHE=$<BOOL:${CC_VULKAN_PIPELINE_CACHE}>)
     target_compile_definitions(${ENGINE_NAME} PUBLIC VK_NO_PROTOTYPES)
     target_compile_definitions(${ENGINE_NAME} PUBLIC CC_USE_VULKAN)
+    add_dependencies(${ENGINE_NAME} cc_vulkan_shader_toolchain)
+    target_include_directories(${ENGINE_NAME} BEFORE PUBLIC
+        ${CC_VULKAN_SHADER_INSTALL_DIR}/$<CONFIG>/include
+    )
+    target_compile_definitions(${ENGINE_NAME} PRIVATE
+        CC_VULKAN_VALIDATION=$<AND:$<BOOL:${CC_VULKAN_VALIDATION}>,$<OR:$<CONFIG:Debug>,$<BOOL:${CC_DEBUG_FORCE}>>>
+    )
+    # Use the tracked, pinned Vulkan headers before external's legacy Khronos tree.
+    target_include_directories(${ENGINE_NAME} BEFORE PUBLIC
+        ${CWD}/cocos/renderer/gfx-vulkan/dependencies/Vulkan-Headers/include
+    )
+    # Vulkan dispatch is supplied explicitly by Volk, including promoted commands.
+    target_compile_definitions(${ENGINE_NAME} PRIVATE
+        VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=0
+    )
 
     if(WIN32)
         target_compile_definitions(${ENGINE_NAME} PUBLIC VK_USE_PLATFORM_WIN32_KHR)
@@ -3825,5 +3847,12 @@ else()
         source_group(TREE ${XR_COMMON_PATH} PREFIX "Source Files/common" FILES ${XR_COMMON_SOURCES})
     else()
         source_group(TREE ${CWD} PREFIX "Source Files" FILES ${COCOS_SOURCE_LIST_EXCLUDE_GENRATED})
+    endif()
+endif()
+
+if(CC_USE_VULKAN)
+    option(CC_VULKAN_BUILD_TESTS "Build tests that initialize the Cocos Vulkan backend" OFF)
+    if(CC_VULKAN_BUILD_TESTS)
+        add_subdirectory(${CWD}/tests/vulkan-engine-smoke ${CMAKE_CURRENT_BINARY_DIR}/vulkan-engine-smoke)
     endif()
 endif()

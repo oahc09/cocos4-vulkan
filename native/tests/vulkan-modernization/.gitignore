@@ -1,0 +1,4 @@
+# M0-C: isolate generated artifacts from source control
+build/
+spirv-out*/
+*.spv

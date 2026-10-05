@@ -24,6 +24,8 @@
 
 #include "VKUtils.h"
 #include "VKGPUObjects.h"
+#include "VKBarrierEncoding.h"
+#include "VKDevice.h"
 
 namespace cc {
 namespace gfx {
@@ -517,12 +519,34 @@ const VkAccessFlags FULL_ACCESS_FLAGS =
     VK_ACCESS_HOST_READ_BIT |
     VK_ACCESS_HOST_WRITE_BIT;
 
+void cmdPipelineBarrier(const CCVKGPUDevice *device, VkCommandBuffer commandBuffer,
+                        VkPipelineStageFlags srcStages, VkPipelineStageFlags dstStages, VkDependencyFlags flags,
+                        uint32_t memoryCount, const VkMemoryBarrier *memory,
+                        uint32_t bufferCount, const VkBufferMemoryBarrier *buffers,
+                        uint32_t imageCount, const VkImageMemoryBarrier *images) {
+    if (!device->runtimePaths.useSynchronization2) {
+        vkCmdPipelineBarrier(commandBuffer, srcStages, dstStages, flags,
+                             memoryCount, memory, bufferCount, buffers, imageCount, images);
+        return;
+    }
+    const auto modern = device->apiVersionInfo.effectiveDeviceApiVersion >= VK_API_VERSION_1_3
+                            ? vkCmdPipelineBarrier2 : vkCmdPipelineBarrier2KHR;
+    VulkanBarrierEncoding encoding;
+    if (!device->capabilities.synchronization2.enabled || !modern ||
+        !encoding.build(srcStages, dstStages, flags, memoryCount, memory, bufferCount, buffers, imageCount, images)) {
+        // Missing a dependency is unsafe: no silent skip or legacy fallback.
+        CC_ABORT();
+        return;
+    }
+    modern(commandBuffer, &encoding.info());
+}
+
 void fullPipelineBarrier(VkCommandBuffer cmdBuff) {
 #if CC_DEBUG > 0
     VkMemoryBarrier memoryBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     memoryBarrier.srcAccessMask = FULL_ACCESS_FLAGS;
     memoryBarrier.dstAccessMask = FULL_ACCESS_FLAGS;
-    vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+    cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), cmdBuff, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                          0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
 #endif
 }

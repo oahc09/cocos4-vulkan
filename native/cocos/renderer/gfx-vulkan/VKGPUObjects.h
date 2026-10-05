@@ -24,8 +24,21 @@
 
 #pragma once
 
+#include <atomic>
+#include <memory>
+#include "VKCapabilities.h"
+#include "VKClassicRenderPassKey.h"
+#include "VKCompletionTracker.h"
+#include "VKComputePipelineKey.h"
+#include "VKFeatureChain.h"
+#include "VKGraphicsPipelineKey.h"
+#include "VKLayoutKeys.h"
+#include "VKPipelineRenderingAdapter.h"
+#include "VKRenderPassSignatureAdapter.h"
+#include "VKShaderStageKey.h"
 #include "VKStd.h"
 #include "VKUtils.h"
+#include "VKWSIState.h"
 #include "base/Log.h"
 #include "base/std/container/unordered_set.h"
 #include "core/memop/CachedArray.h"
@@ -39,6 +52,7 @@ namespace gfx {
 
 class CCVKGPUContext final {
 public:
+    ~CCVKGPUContext() { destroy(); }
     bool initialize();
     void destroy();
 
@@ -48,20 +62,21 @@ public:
 
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkPhysicalDeviceFeatures physicalDeviceFeatures{};
-    VkPhysicalDeviceFeatures2 physicalDeviceFeatures2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-    VkPhysicalDeviceVulkan11Features physicalDeviceVulkan11Features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
-    VkPhysicalDeviceVulkan12Features physicalDeviceVulkan12Features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-    VkPhysicalDeviceFragmentShadingRateFeaturesKHR physicalDeviceFragmentShadingRateFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR};
+    VulkanFeatureChain featureQuery;
+    GfxVKCapabilities capabilities;
     VkPhysicalDeviceDepthStencilResolveProperties physicalDeviceDepthStencilResolveProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES};
     VkPhysicalDeviceProperties physicalDeviceProperties{};
-    VkPhysicalDeviceProperties2 physicalDeviceProperties2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
     VkPhysicalDeviceMemoryProperties physicalDeviceMemoryProperties{};
     ccstd::vector<VkQueueFamilyProperties> queueFamilyProperties;
 
     uint32_t majorVersion = 0;
     uint32_t minorVersion = 0;
+    VulkanApiVersionInfo apiVersionInfo;
 
     bool validationEnabled = false;
+    bool synchronizationValidationEnabled = false;
+    bool bestPracticesValidationEnabled = false;
+    std::atomic_uint32_t validationErrorCount{0};
     bool debugUtils = false;
     bool debugReport = false;
 
@@ -113,6 +128,22 @@ void CCVKDeviceObjectDeleter::operator()(T *ptr) const {
     delete object;
 }
 
+// Recorded event commands retain this object through their recording/batch.
+// Destruction follows the actual queue completion point and needs no host reset.
+struct CCVKGPUEvent final : public CCVKGPUDeviceObject {
+    VkDevice vkDevice = VK_NULL_HANDLE;
+    VkEvent vkEvent = VK_NULL_HANDLE;
+    void shutdown() override {
+        if (vkEvent) vkDestroyEvent(vkDevice, vkEvent, nullptr);
+        vkEvent = VK_NULL_HANDLE;
+    }
+};
+
+struct CCVKDepthStencilResolveModes {
+    VkResolveModeFlagBits depth = VK_RESOLVE_MODE_NONE;
+    VkResolveModeFlagBits stencil = VK_RESOLVE_MODE_NONE;
+};
+
 class CCVKGPURenderPass final : public CCVKGPUDeviceObject {
 public:
     void shutdown() override;
@@ -129,14 +160,67 @@ public:
     ccstd::vector<VkClearValue> clearValues;
     ccstd::vector<VkSampleCountFlagBits> sampleCounts; // per subpass
     ccstd::vector<bool> hasSelfDependency;             // per subpass
+    // per-subpass rendering signature tuples extracted from the classic
+    // create-info (metadata only; valid is NOT a Dynamic Rendering switch)
+    ccstd::vector<VKSubpassRenderingMetadata> renderingMetadata;
+    // Conservative compatibility metadata; invalid does not gate Vulkan creation.
+    VulkanClassicRenderPassKey compatibilityKey;
+    // Actual modes after Classic's device-property filtering, per subpass.
+    // Dynamic must consume these values instead of reinterpreting requests.
+    ccstd::vector<CCVKDepthStencilResolveModes> depthStencilResolveModes;
+    // An optional variant failure keeps the whole pass on Classic. This is
+    // conservative backend state, even when a PSO holds a const owning lease.
+    mutable bool dynamicPipelineCreationFailed = false;
 
     const CCVKGPUGeneralBarrier *getBarrier(size_t index, CCVKGPUDevice *gpuDevice) const;
     bool hasShadingAttachment(uint32_t subPassId) const;
 };
 
 struct CCVKGPUSwapchain;
+
+// A surface can outlive its public swapchain while an old generation retires.
+struct CCVKGPUWSIGeneration;
+struct CCVKGPUWSISurface {
+    ~CCVKGPUWSISurface();
+    void retireGenerations();
+    VkInstance instance = VK_NULL_HANDLE;
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    ccstd::vector<std::weak_ptr<CCVKGPUWSIGeneration>> generations;
+};
+
+// Image views, textures and recycle-bin entries keep their generation alive.
+// Submission and presentation completion are waited before retirement; CPU
+// ownership then determines when its Vulkan handles may actually be released.
+struct CCVKGPUWSIGeneration {
+    ~CCVKGPUWSIGeneration();
+    void waitForPresentCompletion();
+    void releaseVulkanObjects();
+    VkDevice device = VK_NULL_HANDLE;
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    std::shared_ptr<CCVKGPUWSISurface> surface;
+    ccstd::vector<VkSemaphore> renderFinished;
+    ccstd::vector<VkFence> presentFences;
+    ccstd::vector<uint8_t> presentPending;
+    ccstd::vector<uint8_t> imageInitialized;
+    ccstd::vector<uint8_t> imageAcquired;
+    ccstd::vector<uint64_t> acquireSerials;
+    ccstd::unordered_set<VkImageView> imageViews;
+    ccstd::unordered_set<VkFramebuffer> framebuffers;
+    bool retired = false;
+};
 struct CCVKGPUFramebuffer;
+
+struct CCVKGPUWSIUsage {
+    std::shared_ptr<CCVKGPUWSIGeneration> generation;
+    uint32_t imageIndex = 0;
+    uint64_t acquireSerial = 0;
+    bool valid() const {
+        return generation && !generation->retired && imageIndex < generation->imageAcquired.size() && imageIndex < generation->acquireSerials.size() &&
+               generation->imageAcquired[imageIndex] && generation->acquireSerials[imageIndex] == acquireSerial;
+    }
+};
 struct CCVKGPUTexture : public CCVKGPUDeviceObject {
+    bool hasRenderableSwapchainImage() const;
     void shutdown() override;
     void init();
 
@@ -167,6 +251,7 @@ struct CCVKGPUTexture : public CCVKGPUDeviceObject {
     VmaAllocation vmaAllocation = VK_NULL_HANDLE;
 
     CCVKGPUSwapchain *swapchain = nullptr;
+    std::shared_ptr<CCVKGPUWSIGeneration> swapchainGeneration;
     ccstd::vector<VkImage> swapchainVkImages;
     ccstd::vector<VmaAllocation> swapchainVmaAllocations;
 
@@ -237,6 +322,7 @@ struct CCVKGPUBuffer : public CCVKGPUDeviceObject {
     VkBuffer vkBuffer = VK_NULL_HANDLE;
     VkDeviceSize size = 0U;
 
+    VkDeviceSize backingSize = 0U;  // actual VkBuffer size, including frame instances
     VkDeviceSize instanceSize = 0U; // per-back-buffer instance
     ccstd::vector<ThsvsAccessType> currentAccessTypes;
 
@@ -249,11 +335,22 @@ struct CCVKGPUBuffer : public CCVKGPUDeviceObject {
     }
 };
 
+// Opaque staging-block lease token: a staging allocation view holds this
+// shared token; the pool also holds one. reset()/shrinkSize() only recycle a
+// block when the pool is the sole owner (use_count()==1), i.e. no in-flight,
+// pending recordings or a CPU readback still reference its content. The pool
+// retains its cursor until those allocation views are released. Existing pool
+// operations require single-threaded access; this is not a concurrency guard.
+struct CCVKGPUStagingBlockLease {};
+
 struct CCVKGPUBufferView : public CCVKGPUDeviceObject {
     void shutdown() override;
     ConstPtr<CCVKGPUBuffer> gpuBuffer;
     uint32_t offset = 0U;
     uint32_t range = 0U;
+    // Non-null only for staging allocations; keeps the staging block's bytes
+    // alive until every recording referencing this view is retired or dropped.
+    std::shared_ptr<CCVKGPUStagingBlockLease> stagingLease;
 
     uint8_t *mappedData() const {
         return gpuBuffer->mappedData + offset;
@@ -274,16 +371,27 @@ struct CCVKGPUFramebuffer : public CCVKGPUDeviceObject {
     VkFramebuffer vkFramebuffer = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> vkFrameBuffers;
     CCVKGPUSwapchain *swapchain = nullptr;
+    std::shared_ptr<CCVKGPUWSIGeneration> imageGeneration;
     bool isOffscreen = true;
+    uint32_t swapchainGeneration = 0;
     uint32_t width = 0U;
     uint32_t height = 0U;
 };
 
 struct CCVKGPUSwapchain : public CCVKGPUDeviceObject {
     VkSurfaceKHR vkSurface = VK_NULL_HANDLE;
+    std::shared_ptr<CCVKGPUWSISurface> surfaceOwner;
+    std::shared_ptr<CCVKGPUWSIGeneration> imageGeneration;
     VkSwapchainCreateInfoKHR createInfo{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
 
-    uint32_t curImageIndex = 0U;
+    uint32_t curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
+    VulkanWSIStatus wsi;
+    bool runtimeOwnedImages = false;
+    uint32_t generation = 0;
+    bool hasRenderableImage() const {
+        return curImageIndex < swapchainImages.size() &&
+               (runtimeOwnedImages || wsi.hasRenderableImage());
+    }
     VkSwapchainKHR vkSwapchain = VK_NULL_HANDLE;
     ccstd::vector<VkBool32> queueFamilyPresentables;
     VkResult lastPresentResult = VK_NOT_READY;
@@ -292,11 +400,103 @@ struct CCVKGPUSwapchain : public CCVKGPUDeviceObject {
     ccstd::vector<VkImage> swapchainImages;
 };
 
+inline bool CCVKGPUTexture::hasRenderableSwapchainImage() const {
+    if (swapchainGeneration && swapchainGeneration->retired) return false;
+    return swapchain && swapchain->hasRenderableImage() &&
+           (!swapchainGeneration || swapchainGeneration == swapchain->imageGeneration) &&
+           swapchain->curImageIndex < swapchainVkImages.size();
+}
+
+struct CCVKGPURecordingSubmission;
+struct CCVKGPUCommandPoolEpoch {
+    uint64_t value = 1;
+    bool alive = true;
+    uint32_t activeRecordings = 0;
+    std::vector<std::weak_ptr<CCVKGPURecordingSubmission>> submissions;
+    bool canReset();
+};
+
+// Each ended recording owns its references independently of the reusable CB
+// facade's current binding fields. GFXDeviceObject provides virtual destruction;
+// an owning base IntrusivePtr keeps derived shutdown/destructors intact.
+struct CCVKGPURecording {
+    std::shared_ptr<CCVKGPUCommandPoolEpoch> pool;
+    uint64_t poolValue = 0;
+    ccstd::unordered_set<const void *> retainedAddresses;
+    std::vector<ConstPtr<CCVKGPUDeviceObject>> resources;
+    std::vector<std::shared_ptr<CCVKGPURecording>> secondaryRecordings;
+    // Physical dynamic-buffer instances used by this recording, independent
+    // of the frame slot in which the recording is eventually submitted.
+    std::vector<uint32_t> bufferSlots;
+    void recordBufferRange(const CCVKGPUBuffer *buffer, VkDeviceSize offset, VkDeviceSize size) {
+        if (!buffer || !buffer->instanceSize || !size) return;
+        if (offset >= buffer->backingSize || (size != VK_WHOLE_SIZE && size > buffer->backingSize - offset)) {
+            bufferSlots.push_back(UINT32_MAX); // invalid range never reaches submit
+            return;
+        }
+        if (size == VK_WHOLE_SIZE) size = buffer->backingSize - offset;
+        const auto first = offset / buffer->instanceSize;
+        const auto last = (offset + size - 1) / buffer->instanceSize;
+        for (auto slot = first; slot <= last; ++slot) {
+            const auto index = static_cast<uint32_t>(slot);
+            if (std::find(bufferSlots.begin(), bufferSlots.end(), index) == bufferSlots.end()) bufferSlots.push_back(index);
+        }
+    }
+    void appendBufferSlots(std::vector<uint32_t> &slots) const {
+        for (auto slot : bufferSlots) {
+            if (std::find(slots.begin(), slots.end(), slot) == slots.end()) slots.push_back(slot);
+        }
+        for (const auto &secondary : secondaryRecordings) secondary->appendBufferSlots(slots);
+    }
+
+    template <typename T>
+    void retain(const T *object) {
+        if (object && retainedAddresses.insert(object).second) {
+            resources.emplace_back(object);
+        }
+    }
+    bool valid() const {
+        if (!pool || !pool->alive || poolValue != pool->value ||
+            std::find(bufferSlots.begin(), bufferSlots.end(), UINT32_MAX) != bufferSlots.end()) return false;
+        return std::all_of(secondaryRecordings.begin(), secondaryRecordings.end(),
+                           [](const auto &recording) { return recording && recording->valid(); });
+    }
+    void trackSubmission(const std::shared_ptr<CCVKGPURecordingSubmission> &submission) {
+        pool->submissions.push_back(submission);
+        for (const auto &recording : secondaryRecordings) recording->trackSubmission(submission);
+    }
+};
+
+struct CCVKGPURecordingSubmission {
+    std::shared_ptr<GpuCompletionTracker> tracker;
+    GpuCompletionPoint point;
+    std::vector<std::shared_ptr<CCVKGPURecording>> recordings;
+};
+
+inline bool CCVKGPUCommandPoolEpoch::canReset() {
+    if (activeRecordings) return false;
+    for (auto it = submissions.begin(); it != submissions.end();) {
+        const auto submission = it->lock();
+        if (submission && (submission->point.empty() || !submission->tracker->isComplete(submission->point))) return false;
+        it = submissions.erase(it);
+    }
+    return true;
+}
+
 struct CCVKGPUCommandBuffer : public CCVKGPUDeviceObject {
     VkCommandBuffer vkCommandBuffer = VK_NULL_HANDLE;
     VkCommandBufferLevel level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     uint32_t queueFamilyIndex = 0U;
     bool began = false;
+    uint32_t poolHash = 0;
+    std::shared_ptr<CCVKGPURecording> recording;
+    template <typename T>
+    void retain(const T *object) const {
+        if (recording) recording->retain(object);
+    }
+    void recordBufferRange(const CCVKGPUBuffer *buffer, VkDeviceSize offset, VkDeviceSize size) const {
+        if (recording) recording->recordBufferRange(buffer, offset, size);
+    }
     mutable ccstd::unordered_set<VkBuffer> recordedBuffers;
 };
 
@@ -306,6 +506,14 @@ struct CCVKGPUQueue {
     uint32_t queueFamilyIndex = 0U;
     ccstd::vector<uint32_t> possibleQueueFamilyIndices;
     ccstd::vector<VkSemaphore> lastSignaledSemaphores;
+    ccstd::vector<CCVKGPUSwapchain *> acquiredSwapchains;
+    std::shared_ptr<GpuCompletionTracker> completionTracker;
+    GpuCompletionPoint lastCompletion;
+    bool presentSemaphoresSignaled = false;
+    // The acquired batch already has matching early/late layout transitions.
+    bool wsiTransitionsQueued = false;
+    uint64_t discardedWSICommandBuffers = 0;
+    uint64_t discardedRecordingCommandBuffers = 0;
     ccstd::vector<VkPipelineStageFlags> submitStageMasks;
     ccstd::vector<VkCommandBuffer> commandBuffers;
 };
@@ -327,6 +535,7 @@ struct CCVKGPUShaderStage {
     ShaderStageFlagBit type = ShaderStageFlagBit::NONE;
     ccstd::string source;
     VkShaderModule vkShader = VK_NULL_HANDLE;
+    VulkanShaderStageKey contentKey;
 };
 
 struct CCVKGPUShader : public CCVKGPUDeviceObject {
@@ -364,6 +573,15 @@ struct CCVKGPUDescriptor {
 };
 
 struct CCVKGPUDescriptorSetLayout;
+// A VkDescriptorSet version is immutable while active, pending CPU recordings
+// or successful submission batches retain it. Its layout/pool domain survives
+// until the last recording lease retires; shader resources are retained at bind.
+struct CCVKGPUDescriptorVersion final : public CCVKGPUDeviceObject {
+    void shutdown() override;
+    VkDescriptorSet vkDescriptorSet = VK_NULL_HANDLE;
+    uint32_t layoutID = 0;
+    ConstPtr<CCVKGPUDescriptorSetLayout> gpuLayout;
+};
 struct CCVKGPUDescriptorSet : public CCVKGPUDeviceObject {
     void shutdown() override;
 
@@ -377,10 +595,11 @@ struct CCVKGPUDescriptorSet : public CCVKGPUDeviceObject {
 
     struct Instance {
         VkDescriptorSet vkDescriptorSet = VK_NULL_HANDLE;
+        IntrusivePtr<CCVKGPUDescriptorVersion> version;
         ccstd::vector<CCVKDescriptorInfo> descriptorInfos;
         ccstd::vector<VkWriteDescriptorSet> descriptorUpdateEntries;
     };
-    ccstd::vector<Instance> instances; // per swapchain image
+    mutable ccstd::vector<Instance> instances; // per frame slot; mutable Vulkan cache
 
     uint32_t layoutID = 0U;
 };
@@ -391,6 +610,7 @@ struct CCVKGPUPipelineLayout : public CCVKGPUDeviceObject {
     ccstd::vector<ConstPtr<CCVKGPUDescriptorSetLayout>> setLayouts;
 
     VkPipelineLayout vkPipelineLayout = VK_NULL_HANDLE;
+    VulkanPipelineLayoutKey contentKey;
 
     // helper storage
     ccstd::vector<uint32_t> dynamicOffsetOffsets;
@@ -412,6 +632,19 @@ struct CCVKGPUPipelineState : public CCVKGPUDeviceObject {
     ConstPtr<CCVKGPURenderPass> gpuRenderPass;
     uint32_t subpass = 0U;
     VkPipeline vkPipeline = VK_NULL_HANDLE;
+    // optional engine-owned Dynamic variant (M6-A2a): created only when the
+    // dynamic runtime path is explicitly prepared AND the RP is a candidate;
+    // Classic stays usable when this is NULL / creationFailed
+    VkPipeline vkDynamicPipeline = VK_NULL_HANDLE;
+    bool dynamicPipelineCreationFailed = false;
+    // value snapshot of the render pass slot this PSO targets (M5-H);
+    // default invalid, never gates the classic path
+    VKSubpassRenderingMetadata renderingMetadata;
+    // Input content metadata for the current compute encoder; invalid for graphics.
+    VulkanComputePipelineKey computeContentKey;
+    // Complete input value snapshots; metadata failure never gates driver creation.
+    VulkanGraphicsPipelineKey graphicsContentKey;
+    VulkanGraphicsPipelineKey dynamicContentKey;
 };
 
 struct CCVKGPUBufferBarrier {
@@ -441,10 +674,29 @@ class CCVKGPUDescriptorSetPool;
 class CCVKGPUDevice final {
 public:
     VkDevice vkDevice{VK_NULL_HANDLE};
+    ccstd::unordered_map<VkQueue, std::shared_ptr<GpuCompletionTracker>> completionTrackers;
+    ccstd::unordered_map<VkQueue, VkSemaphore> completionSemaphores;
+    uint64_t maxTimelineSemaphoreValueDifference{0};
+    uint64_t trackedSubmitCount{0};
+    uint64_t submissionFenceCount{0};
+    ccstd::vector<ccstd::vector<GpuCompletionPoint>> slotCompletions;
+    std::vector<std::shared_ptr<CCVKGPURecordingSubmission>> recordingSubmissions;
+    std::shared_ptr<GpuCompletionTracker> getCompletionTracker(VkQueue queue);
+    VkResult submitTracked(CCVKGPUQueue *queue, const VulkanSubmitBatch &info, VkFence fence, GpuCompletionPoint &point,
+                           const std::vector<std::shared_ptr<CCVKGPURecording>> &recordings = {});
+    void retireRecordings();
+    VkResult observeCompletedFences(const VkFence *fences, uint32_t count);
+    bool slotComplete(uint32_t slot);
+    VkResult waitSlot(uint32_t slot, uint64_t timeout);
+    void shutdownCompletionTrackers(); // caller has already made the device idle
+
     ccstd::vector<VkLayerProperties> layers;
     ccstd::vector<VkExtensionProperties> extensions;
     VmaAllocator memoryAllocator{VK_NULL_HANDLE};
     uint32_t minorVersion{0U};
+    VulkanApiVersionInfo apiVersionInfo;
+    GfxVKCapabilities capabilities;
+    VulkanRuntimePaths runtimePaths;
 
     VkFormat depthFormat{VK_FORMAT_UNDEFINED};
     VkFormat depthStencilFormat{VK_FORMAT_UNDEFINED};
@@ -523,6 +775,9 @@ public:
         return _fences.data();
     }
 
+    // Created objects, including those currently idle in the pool.
+    uint32_t allocatedCount() const { return static_cast<uint32_t>(_fences.size()); }
+
     uint32_t size() const {
         return _count;
     }
@@ -567,6 +822,9 @@ public:
     void reset() {
         _count = 0;
     }
+
+    // Created objects, including those currently idle in the pool.
+    uint32_t allocatedCount() const { return static_cast<uint32_t>(_semaphores.size()); }
 
     uint32_t size() const {
         return _count;
@@ -670,6 +928,7 @@ struct CCVKGPUDescriptorSetLayout : public CCVKGPUDeviceObject {
 
     ccstd::vector<VkDescriptorSetLayoutBinding> vkBindings;
     VkDescriptorSetLayout vkDescriptorSetLayout = VK_NULL_HANDLE;
+    VulkanDescriptorSetLayoutKey contentKey;
     VkDescriptorUpdateTemplate vkDescriptorUpdateTemplate = VK_NULL_HANDLE;
     VkDescriptorSet defaultDescriptorSet = VK_NULL_HANDLE;
 
@@ -693,6 +952,7 @@ public:
     ~CCVKGPUCommandBufferPool() {
         for (auto &it : _pools) {
             CommandBufferPool &pool = it.second;
+            pool.epoch->alive = false;
             if (pool.vkCommandPool != VK_NULL_HANDLE) {
                 vkDestroyCommandPool(_device->vkDevice, pool.vkCommandPool, nullptr);
                 pool.vkCommandPool = VK_NULL_HANDLE;
@@ -726,6 +986,12 @@ public:
         }
         CommandBufferPool &pool = _pools[hash];
 
+        gpuCommandBuffer->poolHash = hash;
+        gpuCommandBuffer->recording = std::make_shared<CCVKGPURecording>();
+        gpuCommandBuffer->recording->pool = pool.epoch;
+        gpuCommandBuffer->recording->poolValue = pool.epoch->value;
+        ++pool.epoch->activeRecordings;
+
         CachedArray<VkCommandBuffer> &availableList = pool.commandBuffers[gpuCommandBuffer->level];
         if (availableList.size()) {
             gpuCommandBuffer->vkCommandBuffer = availableList.pop();
@@ -740,12 +1006,15 @@ public:
 
     void yield(CCVKGPUCommandBuffer *gpuCommandBuffer) {
         if (gpuCommandBuffer->vkCommandBuffer) {
-            uint32_t hash = getHash(gpuCommandBuffer->queueFamilyIndex);
+            uint32_t hash = gpuCommandBuffer->poolHash;
             CC_ASSERT(_pools.count(hash)); // Wrong command pool to yield?
 
             CommandBufferPool &pool = _pools[hash];
+            CC_ASSERT(pool.epoch->activeRecordings);
+            --pool.epoch->activeRecordings;
             pool.usedCommandBuffers[gpuCommandBuffer->level].push(gpuCommandBuffer->vkCommandBuffer);
             gpuCommandBuffer->vkCommandBuffer = VK_NULL_HANDLE;
+            gpuCommandBuffer->recording.reset();
         }
     }
 
@@ -755,24 +1024,33 @@ public:
                 continue;
             }
             CommandBufferPool &pool = it.second;
+            // A recording can be submitted from another frame slot. Its actual
+            // queue point, not the pool's original slot, protects GPU execution.
+            if (!pool.epoch->canReset()) continue;
 
             bool needsReset = false;
             for (uint32_t i = 0U; i < 2U; ++i) {
                 CachedArray<VkCommandBuffer> &usedList = pool.usedCommandBuffers[i];
                 if (usedList.size()) {
-                    pool.commandBuffers[i].concat(usedList);
-                    usedList.clear();
                     needsReset = true;
                 }
             }
             if (needsReset) {
-                VK_CHECK(vkResetCommandPool(_device->vkDevice, pool.vkCommandPool, 0));
+                const auto result = vkResetCommandPool(_device->vkDevice, pool.vkCommandPool, 0);
+                VK_CHECK(result);
+                if (result != VK_SUCCESS) continue;
+                ++pool.epoch->value;
+                for (uint32_t i = 0; i < 2; ++i) {
+                    pool.commandBuffers[i].concat(pool.usedCommandBuffers[i]);
+                    pool.usedCommandBuffers[i].clear();
+                }
             }
         }
     }
 
 private:
     struct CommandBufferPool {
+        std::shared_ptr<CCVKGPUCommandPoolEpoch> epoch = std::make_shared<CCVKGPUCommandPoolEpoch>();
         VkCommandPool vkCommandPool = VK_NULL_HANDLE;
         CachedArray<VkCommandBuffer> commandBuffers[2];
         CachedArray<VkCommandBuffer> usedCommandBuffers[2];
@@ -829,12 +1107,19 @@ public:
         auto *bufferView = new CCVKGPUBufferView;
         bufferView->gpuBuffer = buffer->gpuBuffer;
         bufferView->offset = offset;
+        bufferView->range = size;
+        bufferView->stagingLease = buffer->lease; // hold the block lease
         buffer->curOffset = offset + size;
         return bufferView;
     }
 
     void reset() {
         for (Buffer &buffer : _pool) {
+            // Only recycle when the pool is the sole lease owner: any live
+            // staging view (pending recording, in-flight submission, or
+            // not-yet-retired completion) blocks the cursor reset so old
+            // bytes cannot be overwritten.
+            if (buffer.lease && buffer.lease.use_count() > 1) continue;
             buffer.curOffset = 0U;
         }
     }
@@ -847,7 +1132,8 @@ public:
                 ++iter;
                 continue;
             }
-            if (iter->curOffset == 0) {
+            // Only erase fully-reset blocks with no external leases.
+            if (iter->curOffset == 0 && (!iter->lease || iter->lease.use_count() == 1)) {
                 iter = _pool.erase(iter);
             } else {
                 ++iter;
@@ -859,6 +1145,9 @@ private:
     struct Buffer {
         IntrusivePtr<CCVKGPUBuffer> gpuBuffer;
         VkDeviceSize curOffset = 0U;
+        // One lease per block; created with the block, shared with each
+        // staging allocation view from this block.
+        std::shared_ptr<CCVKGPUStagingBlockLease> lease = std::make_shared<CCVKGPUStagingBlockLease>();
     };
 
     CCVKGPUDevice *_device = nullptr;
@@ -873,11 +1162,7 @@ public:
     explicit CCVKGPUDescriptorSetHub(CCVKGPUDevice *device)
     : _device(device) {
         _setsToBeUpdated.resize(device->backBufferCount);
-        if (device->minorVersion > 0) {
-            _updateFn = vkUpdateDescriptorSetWithTemplate;
-        } else {
-            _updateFn = vkUpdateDescriptorSetWithTemplateKHR;
-        }
+        _updateFn = vkUpdateDescriptorSetWithTemplate;
     }
 
     void record(const CCVKGPUDescriptorSet *gpuDescriptorSet) {
@@ -913,7 +1198,18 @@ public:
 
 private:
     void update(const CCVKGPUDescriptorSet *gpuDescriptorSet) {
-        const CCVKGPUDescriptorSet::Instance &instance = gpuDescriptorSet->instances[_device->curBackBufferIndex];
+        auto &instance = gpuDescriptorSet->instances[_device->curBackBufferIndex];
+        // Metadata may change for a future binding, but never write a set that
+        // an earlier recording or unretired submission can still execute.
+        if (instance.version->getRefCount() > 1) {
+            IntrusivePtr<CCVKGPUDescriptorVersion> replacement = ccnew CCVKGPUDescriptorVersion;
+            replacement->layoutID = gpuDescriptorSet->layoutID;
+            replacement->gpuLayout = gpuDescriptorSet->gpuLayout;
+            replacement->vkDescriptorSet = _device->getDescriptorSetPool(replacement->layoutID)->request();
+            instance.vkDescriptorSet = replacement->vkDescriptorSet;
+            instance.version = std::move(replacement);
+            for (auto &entry : instance.descriptorUpdateEntries) entry.dstSet = instance.vkDescriptorSet;
+        }
         if (gpuDescriptorSet->gpuLayout->vkDescriptorUpdateTemplate) {
             _updateFn(_device->vkDevice, instance.vkDescriptorSet,
                       gpuDescriptorSet->gpuLayout->vkDescriptorUpdateTemplate, instance.descriptorInfos.data());
@@ -1122,9 +1418,13 @@ public:
     void collect(const CCVKGPUTexture *texture);
     void collect(const CCVKGPUTextureView *textureView);
     void collect(const CCVKGPUFramebuffer *frameBuffer);
-    void collect(const CCVKGPUDescriptorSet *set);
     void collect(uint32_t layoutId, VkDescriptorSet set);
     void collect(const CCVKGPUBuffer *buffer);
+    void collectSemaphore(VkSemaphore semaphore) {
+        Resource &res = emplaceBack();
+        res.type = RecycledType::SEMAPHORE;
+        res.vkSemaphore = semaphore;
+    }
 
 #define DEFINE_RECYCLE_BIN_COLLECT_FN(_type, typeValue, expr)                        \
     void collect(const _type *gpuRes) { /* NOLINT(bugprone-macro-parentheses) N/A */ \
@@ -1136,7 +1436,7 @@ public:
     DEFINE_RECYCLE_BIN_COLLECT_FN(CCVKGPURenderPass, RecycledType::RENDER_PASS, res.vkRenderPass = gpuRes->vkRenderPass)
     DEFINE_RECYCLE_BIN_COLLECT_FN(CCVKGPUSampler, RecycledType::SAMPLER, res.vkSampler = gpuRes->vkSampler)
     DEFINE_RECYCLE_BIN_COLLECT_FN(CCVKGPUQueryPool, RecycledType::QUERY_POOL, res.vkQueryPool = gpuRes->vkPool)
-    DEFINE_RECYCLE_BIN_COLLECT_FN(CCVKGPUPipelineState, RecycledType::PIPELINE_STATE, res.vkPipeline = gpuRes->vkPipeline)
+    DEFINE_RECYCLE_BIN_COLLECT_FN(CCVKGPUPipelineState, RecycledType::PIPELINE_STATE, res.vkPipeline = gpuRes->vkPipeline; res.vkDynamicPipeline = gpuRes->vkDynamicPipeline)
 
     void clear();
 
@@ -1153,7 +1453,8 @@ private:
         SAMPLER,
         PIPELINE_STATE,
         DESCRIPTOR_SET,
-        EVENT
+        EVENT,
+        SEMAPHORE
     };
     struct Buffer {
         VkBuffer vkBuffer;
@@ -1169,6 +1470,7 @@ private:
     };
     struct Resource {
         RecycledType type = RecycledType::UNKNOWN;
+        std::shared_ptr<CCVKGPUWSIGeneration> swapchainGeneration;
         union {
             // resizable resources, cannot take over directly
             // or descriptor sets won't work
@@ -1183,7 +1485,11 @@ private:
             VkSampler vkSampler;
             VkEvent vkEvent;
             VkPipeline vkPipeline;
+            VkSemaphore vkSemaphore;
         };
+        // pipeline pair handle outside the union: assigned on every
+        // PIPELINE_STATE collect (no stale reuse), cleared exactly once
+        VkPipeline vkDynamicPipeline = VK_NULL_HANDLE;
     };
 
     Resource &emplaceBack() {
@@ -1256,8 +1562,10 @@ public:
         _lateCmdBuff.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         _lateCmdBuff.queueFamilyIndex = _queue->queueFamilyIndex;
 
-        VkFenceCreateInfo createInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        VK_CHECK(vkCreateFence(_device->vkDevice, &createInfo, nullptr, &_fence));
+        if (!_queue->completionTracker->usesTimeline()) {
+            VkFenceCreateInfo createInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            VK_CHECK(vkCreateFence(_device->vkDevice, &createInfo, nullptr, &_fence));
+        }
     }
 
     ~CCVKGPUTransportHub() {
@@ -1266,6 +1574,8 @@ public:
             _fence = VK_NULL_HANDLE;
         }
     }
+
+    uint32_t allocatedFenceCount() const { return _fence ? 1U : 0U; }
 
     bool empty(bool late) const {
         const CCVKGPUCommandBuffer *cmdBuff = late ? &_lateCmdBuff : &_earlyCmdBuff;
@@ -1289,23 +1599,24 @@ public:
 
         if (immediateSubmission) {
             VK_CHECK(vkEndCommandBuffer(cmdBuff->vkCommandBuffer));
-            VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-            submitInfo.commandBufferCount = 1;
-            submitInfo.pCommandBuffers = &cmdBuff->vkCommandBuffer;
-            VK_CHECK(vkQueueSubmit(_queue->vkQueue, 1, &submitInfo, _fence));
-            VK_CHECK(vkWaitForFences(_device->vkDevice, 1, &_fence, VK_TRUE, DEFAULT_TIMEOUT));
-            vkResetFences(_device->vkDevice, 1, &_fence);
+            VulkanSubmitBatch submitInfo;
+            submitInfo.commands.push_back(cmdBuff->vkCommandBuffer);
+            GpuCompletionPoint point;
+            VK_CHECK(_device->submitTracked(_queue, submitInfo, _fence, point, {cmdBuff->recording}));
+            VK_CHECK(_queue->completionTracker->wait(point, DEFAULT_TIMEOUT));
+            if (_fence) VK_CHECK(vkResetFences(_device->vkDevice, 1, &_fence));
             commandBufferPool->yield(cmdBuff);
             cmdBuff->vkCommandBuffer = VK_NULL_HANDLE;
         }
     }
 
-    VkCommandBuffer packageForFlight(bool late) {
+    VkCommandBuffer packageForFlight(bool late, std::vector<std::shared_ptr<CCVKGPURecording>> &recordings) {
         CCVKGPUCommandBuffer *cmdBuff = late ? &_lateCmdBuff : &_earlyCmdBuff;
 
         VkCommandBuffer vkCommandBuffer = cmdBuff->vkCommandBuffer;
         if (vkCommandBuffer) {
             VK_CHECK(vkEndCommandBuffer(vkCommandBuffer));
+            recordings.push_back(cmdBuff->recording);
             _device->getCommandBufferPool()->yield(cmdBuff);
         }
         return vkCommandBuffer;

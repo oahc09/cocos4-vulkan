@@ -33,6 +33,7 @@
 #include "VKQueryPool.h"
 #include "VKQueue.h"
 #include "VKRenderPass.h"
+#include "VKSecondaryInheritanceAdapter.h"
 #include "VKTexture.h"
 #include "base/std/hash/hash_fwd.hpp"
 #include "profiler/Profiler.h"
@@ -62,23 +63,53 @@ void CCVKCommandBuffer::doInit(const CommandBufferInfo & /*info*/) {
     _curDynamicOffsetsArray.resize(setCount);
 }
 
-void CCVKCommandBuffer::doDestroy() {
-    if (_gpuCommandBuffer) {
-        auto cleanEvent = [this](VkEvent event) {
-            auto res = vkResetEvent(CCVKDevice::getInstance()->gpuDevice()->vkDevice, event);
-            CC_ASSERT(res == VK_SUCCESS);
-            vkDestroyEvent(CCVKDevice::getInstance()->gpuDevice()->vkDevice, event, nullptr);
-        };
-        while (!_availableEvents.empty()) {
-            VkEvent event = _availableEvents.front();
-            cleanEvent(event);
-            _availableEvents.pop();
-        }
-        for (auto pair : _barrierEvents) {
-            cleanEvent(pair.second);
-        }
+void CCVKCommandBuffer::recordSwapchainUsage(const CCVKGPUSwapchain *swapchain) {
+    if (!swapchain || swapchain->runtimeOwnedImages || !swapchain->imageGeneration || !swapchain->hasRenderableImage()) return;
+    const auto index = swapchain->curImageIndex;
+    CCVKGPUWSIUsage usage{swapchain->imageGeneration, index, swapchain->imageGeneration->acquireSerials[index]};
+    for (const auto &existing : _recordedWSIUsage) {
+        if (existing.generation == usage.generation && existing.imageIndex == index && existing.acquireSerial == usage.acquireSerial) return;
     }
+    _recordedWSIUsage.push_back(std::move(usage));
+}
 
+bool CCVKCommandBuffer::pendingWSIUsageValid() const {
+    if (_pendingWSIUsage.empty()) return false;
+    for (const auto &usage : _pendingWSIUsage.front()) {
+        if (!usage.valid()) return false;
+    }
+    return true;
+}
+
+bool CCVKCommandBuffer::pendingRecordingValid() const {
+    return !_pendingRecordings.empty() && _pendingRecordings.front() && _pendingRecordings.front()->valid();
+}
+
+void CCVKCommandBuffer::doDestroy() {
+    // Release the facade's cache, not submitted event handles. Recordings and
+    // their completion batches still own every event referenced by GPU work.
+    while (!_availableEvents.empty()) _availableEvents.pop();
+    _barrierEvents.clear();
+
+    _curGPUFBO = nullptr;
+    _curGPURenderPass = nullptr;
+    _curGPUPipelineState = nullptr;
+    _curGPUInputAssembler = nullptr;
+    _curGPUDescriptorSets.clear();
+    _dynamicRenderPass = false;
+    _boundGraphicsPipeline = VK_NULL_HANDLE;
+    _dynamicRenderingInfo.reset();
+    _dynamicTransition.reset();
+    _dynamicResolveTransition.reset();
+    _dynamicDepthStencilTransition.reset();
+    _dynamicDepthStencilResolveTransition.reset();
+    _recordedWSIUsage.clear();
+    while (!_pendingQueue.empty()) _pendingQueue.pop();
+    while (!_pendingWSIUsage.empty()) _pendingWSIUsage.pop();
+    while (!_pendingRecordings.empty()) _pendingRecordings.pop();
+    if (_gpuCommandBuffer && _gpuCommandBuffer->vkCommandBuffer) {
+        CCVKDevice::getInstance()->gpuDevice()->getCommandBufferPool()->yield(_gpuCommandBuffer);
+    }
     _gpuCommandBuffer = nullptr;
 }
 
@@ -90,6 +121,13 @@ void CCVKCommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Framebuf
 
     _curGPUPipelineState = nullptr;
     _curGPUInputAssembler = nullptr;
+    _dynamicRenderPass = false;
+    _boundGraphicsPipeline = VK_NULL_HANDLE;
+    _dynamicRenderingInfo.reset();
+    _dynamicTransition.reset();
+    _dynamicResolveTransition.reset();
+    _dynamicDepthStencilTransition.reset();
+    _dynamicDepthStencilResolveTransition.reset();
     _curGPUDescriptorSets.assign(_curGPUDescriptorSets.size(), nullptr);
     _curDynamicOffsetsArray.assign(_curDynamicOffsetsArray.size(), {});
     _firstDirtyDescriptorSet = UINT_MAX;
@@ -97,24 +135,54 @@ void CCVKCommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Framebuf
     _numDrawCalls = 0;
     _numInstances = 0;
     _numTriangles = 0;
+    _skipRenderPass = false;
+    _skipSecondaryExecution = false;
+    _recordedWSIUsage.clear();
 
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VkCommandBufferInheritanceInfo inheritanceInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO};
 
     if (renderPass) {
+        _gpuCommandBuffer->retain(static_cast<CCVKRenderPass *>(renderPass)->gpuRenderPass());
         inheritanceInfo.renderPass = static_cast<CCVKRenderPass *>(renderPass)->gpuRenderPass()->vkRenderPass;
         inheritanceInfo.subpass = subpass;
         if (frameBuffer) {
             CCVKGPUFramebuffer *gpuFBO = static_cast<CCVKFramebuffer *>(frameBuffer)->gpuFBO();
+            _gpuCommandBuffer->retain(gpuFBO);
             if (gpuFBO->isOffscreen) {
                 inheritanceInfo.framebuffer = gpuFBO->vkFramebuffer;
             } else {
-                inheritanceInfo.framebuffer = gpuFBO->vkFrameBuffers[gpuFBO->swapchain->curImageIndex];
+                const auto *swapchain = gpuFBO->swapchain;
+                if ((gpuFBO->imageGeneration && gpuFBO->imageGeneration->retired) || !swapchain->hasRenderableImage() || swapchain->curImageIndex >= gpuFBO->vkFrameBuffers.size() ||
+                    gpuFBO->swapchainGeneration != swapchain->generation) {
+                    _skipRenderPass = _skipSecondaryExecution = true;
+                } else {
+                    inheritanceInfo.framebuffer = gpuFBO->vkFrameBuffers[swapchain->curImageIndex];
+                    recordSwapchainUsage(swapchain);
+                }
             }
         }
         beginInfo.pInheritanceInfo = &inheritanceInfo;
         beginInfo.flags |= VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
+
+        // M5-I: secondary CBs build their begin/inheritance pair through
+        // the adapter (Classic mode). The owner lives until
+        // vkBeginCommandBuffer below; the primary path keeps its locals.
+        if (_gpuCommandBuffer->level == VK_COMMAND_BUFFER_LEVEL_SECONDARY && !_skipRenderPass) {
+            VKSecondaryInheritanceAdapter secondaryInheritance;
+            if (!secondaryInheritance.build(VKSecondaryInheritanceAdapter::Mode::Classic, beginInfo,
+                                            inheritanceInfo, nullptr, 0)) {
+                CC_ASSERT(false); // must never dangle the inheritance chain
+                _gpuCommandBuffer->began = false;
+                return;
+            }
+            VK_CHECK(vkBeginCommandBuffer(_gpuCommandBuffer->vkCommandBuffer,
+                                          &secondaryInheritance.beginInfo()));
+            _gpuCommandBuffer->began = true;
+            _gpuCommandBuffer->recordedBuffers.clear();
+            return;
+        }
     }
 
     VK_CHECK(vkBeginCommandBuffer(_gpuCommandBuffer->vkCommandBuffer, &beginInfo));
@@ -126,6 +194,8 @@ void CCVKCommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Framebuf
 void CCVKCommandBuffer::end() {
     CC_ASSERT(_gpuCommandBuffer->began);
     if (!_gpuCommandBuffer->began) return;
+    // Rejected draws never skip closing an already begun Dynamic instance.
+    if (_dynamicRenderPass) endRenderPass();
 
     _curGPUFBO = nullptr;
     _curGPUInputAssembler = nullptr;
@@ -134,6 +204,8 @@ void CCVKCommandBuffer::end() {
     _gpuCommandBuffer->began = false;
 
     _pendingQueue.push(_gpuCommandBuffer->vkCommandBuffer);
+    _pendingRecordings.push(_gpuCommandBuffer->recording);
+    _pendingWSIUsage.push(std::move(_recordedWSIUsage));
     CCVKDevice::getInstance()->gpuDevice()->getCommandBufferPool()->yield(_gpuCommandBuffer);
 }
 
@@ -147,24 +219,33 @@ void CCVKCommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *fbo
         VkMemoryBarrier vkBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         vkBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         vkBarrier.dstAccessMask = VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
-        vkCmdPipelineBarrier(_gpuCommandBuffer->vkCommandBuffer,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                             0, 1, &vkBarrier, 0, nullptr, 0, nullptr);
+        cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), _gpuCommandBuffer->vkCommandBuffer,
+                           VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                           0, 1, &vkBarrier, 0, nullptr, 0, nullptr);
 #endif
     } else {
         const auto &dependencies = renderPass->getDependencies();
         if (!dependencies.empty()) {
             const auto &frontBarrier = dependencies.front();
-            //pipelineBarrier(frontBarrier.generalBarrier, frontBarrier.bufferBarriers, frontBarrier.buffers, frontBarrier.bufferBarrierCount, frontBarrier.textureBarriers, frontBarrier.textures, frontBarrier.textureBarrierCount);
+            // pipelineBarrier(frontBarrier.generalBarrier, frontBarrier.bufferBarriers, frontBarrier.buffers, frontBarrier.bufferBarrierCount, frontBarrier.textureBarriers, frontBarrier.textures, frontBarrier.textureBarrierCount);
         }
     }
 
     _curGPUFBO = static_cast<CCVKFramebuffer *>(fbo)->gpuFBO();
     _curGPURenderPass = static_cast<CCVKRenderPass *>(renderPass)->gpuRenderPass();
+    _gpuCommandBuffer->retain(_curGPUFBO.get());
+    _gpuCommandBuffer->retain(_curGPURenderPass.get());
     VkFramebuffer framebuffer{_curGPUFBO->vkFramebuffer};
     if (!_curGPUFBO->isOffscreen) {
+        if ((_curGPUFBO->imageGeneration && _curGPUFBO->imageGeneration->retired) || !_curGPUFBO->swapchain->hasRenderableImage() ||
+            _curGPUFBO->swapchain->curImageIndex >= _curGPUFBO->vkFrameBuffers.size() ||
+            _curGPUFBO->swapchainGeneration != _curGPUFBO->swapchain->generation) {
+            _skipRenderPass = true;
+            return;
+        }
         framebuffer = _curGPUFBO->vkFrameBuffers[_curGPUFBO->swapchain->curImageIndex];
+        recordSwapchainUsage(_curGPUFBO->swapchain);
     }
 
     ccstd::vector<VkClearValue> &clearValues = _curGPURenderPass->clearValues;
@@ -195,8 +276,15 @@ void CCVKCommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *fbo
     passBeginInfo.renderArea.offset = {safeArea.x, safeArea.y};
     passBeginInfo.renderArea.extent = {safeArea.width, safeArea.height};
 
-    vkCmdBeginRenderPass(_gpuCommandBuffer->vkCommandBuffer, &passBeginInfo,
-                         secondaryCBCount ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE);
+    _dynamicRenderPass = !clearValues.empty() &&
+                         beginDynamicRenderPass(passBeginInfo.renderArea, clearValues[0],
+                                                _curGPURenderPass->depthStencilAttachment.format != Format::UNKNOWN && attachmentCount < clearValues.size()
+                                                    ? &clearValues[attachmentCount] : nullptr,
+                                                secondaryCBCount);
+    if (!_dynamicRenderPass) {
+        vkCmdBeginRenderPass(_gpuCommandBuffer->vkCommandBuffer, &passBeginInfo,
+                             secondaryCBCount ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE);
+    }
 
     _secondaryRP = secondaryCBCount;
 
@@ -212,9 +300,264 @@ void CCVKCommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *fbo
     _hasSubPassSelfDependency = false;
 }
 
+bool CCVKCommandBuffer::beginDynamicRenderPass(const VkRect2D &area, const VkClearValue &clear, const VkClearValue *depthStencilClear, uint32_t secondaryCBCount) {
+    auto *device = CCVKDevice::getInstance();
+    const auto *gpuDevice = device->gpuDevice();
+    if (!gpuDevice->runtimePaths.useDynamicRendering || gpuDevice->runtimePaths.forceClassicRenderPass ||
+        !gpuDevice->capabilities.dynamicRendering.enabled || device->autoBarrierEnabled() ||
+        device->gpuContext()->apiVersionInfo.effectiveDeviceApiVersion < VK_API_VERSION_1_3 ||
+        !vkCmdBeginRendering || !vkCmdEndRendering || secondaryCBCount ||
+        _gpuCommandBuffer->level != VK_COMMAND_BUFFER_LEVEL_PRIMARY ||
+        !_curGPUFBO->isOffscreen || _curGPUFBO->swapchain ||
+        _curGPUFBO->gpuRenderPass.get() != _curGPURenderPass.get() ||
+        _curGPUFBO->gpuColorViews.size() != _curGPURenderPass->colorAttachments.size() ||
+        !vkIsDynamicRenderPassCandidate(_curGPURenderPass.get())) return false;
+
+    const auto *view = _curGPUFBO->gpuColorViews[0].get();
+    if (!view || !view->gpuTexture) return false;
+    const auto *texture = view->gpuTexture.get();
+    const auto &signature = _curGPURenderPass->renderingMetadata[0].signature;
+    const bool hasColorResolve = !_curGPURenderPass->subpasses[0].resolves.empty();
+    const bool hasDepthResolve = _curGPURenderPass->subpasses[0].depthStencilResolve != INVALID_BINDING;
+    // A pre-bound graphics PSO can choose Classic before any BeginRendering.
+    // A later incompatible PSO is rejected by draw; an active instance cannot
+    // be converted to Classic after it has begun.
+    if (_curGPUPipelineState && _curGPUPipelineState->bindPoint == PipelineBindPoint::GRAPHICS &&
+        (!_curGPUPipelineState->renderingMetadata.valid ||
+         _curGPUPipelineState->renderingMetadata.signature != signature ||
+         _curGPUPipelineState->vkDynamicPipeline == VK_NULL_HANDLE ||
+         _curGPUPipelineState->dynamicPipelineCreationFailed)) return false;
+    if (view->vkImageView == VK_NULL_HANDLE || texture->vkImage == VK_NULL_HANDLE || texture->swapchain ||
+        texture->externalVKImage != VK_NULL_HANDLE || !texture->memoryAllocated ||
+        texture->type != TextureType::TEX2D || view->type != TextureType::TEX2D ||
+        texture->flags != TextureFlagBit::NONE || static_cast<VkSampleCountFlagBits>(texture->samples) != signature.samples ||
+        texture->mipLevels != 1 || texture->arrayLayers != 1 || texture->depth != 1 ||
+        texture->aspectMask != VK_IMAGE_ASPECT_COLOR_BIT ||
+        !(texture->usage & TextureUsageBit::COLOR_ATTACHMENT) ||
+        view->baseLevel || view->levelCount != 1 || view->baseLayer || view->layerCount != 1 ||
+        view->basePlane || view->planeCount != 1 || view->format != texture->format ||
+        mapVkFormat(view->format, gpuDevice) != signature.colorFormats[0] ||
+        area.offset.x < 0 || area.offset.y < 0 || !area.extent.width || !area.extent.height ||
+        static_cast<uint64_t>(area.offset.x) + area.extent.width > texture->width ||
+        static_cast<uint64_t>(area.offset.y) + area.extent.height > texture->height) return false;
+
+    const auto *resolveView = hasColorResolve ? _curGPUFBO->gpuColorViews[1].get() : nullptr;
+    if (hasColorResolve) {
+        if (!resolveView || !resolveView->gpuTexture) return false;
+        const auto *resolveTexture = resolveView->gpuTexture.get();
+        if (!resolveView->vkImageView || !resolveTexture->vkImage || resolveTexture->vkImage == texture->vkImage ||
+            resolveTexture->swapchain || resolveTexture->externalVKImage || !resolveTexture->memoryAllocated ||
+            resolveTexture->type != TextureType::TEX2D || resolveView->type != TextureType::TEX2D ||
+            resolveTexture->flags != TextureFlagBit::NONE || resolveTexture->samples != SampleCount::X1 ||
+            resolveTexture->mipLevels != 1 || resolveTexture->arrayLayers != 1 || resolveTexture->depth != 1 ||
+            resolveTexture->aspectMask != VK_IMAGE_ASPECT_COLOR_BIT || !(resolveTexture->usage & TextureUsageBit::COLOR_ATTACHMENT) ||
+            resolveView->baseLevel || resolveView->levelCount != 1 || resolveView->baseLayer || resolveView->layerCount != 1 ||
+            resolveView->basePlane || resolveView->planeCount != 1 || resolveView->format != resolveTexture->format ||
+            mapVkFormat(resolveView->format, gpuDevice) != signature.colorFormats[0] ||
+            resolveTexture->width != texture->width || resolveTexture->height != texture->height) return false;
+    }
+
+    const auto *dsView = _curGPUFBO->gpuDepthStencilView.get();
+    const bool hasDepth = signature.depthFormat != VK_FORMAT_UNDEFINED;
+    const bool hasStencil = signature.stencilFormat != VK_FORMAT_UNDEFINED;
+    if (hasDepth != (dsView != nullptr)) return false;
+    if (hasDepth) {
+        if (!depthStencilClear || !dsView->gpuTexture) return false;
+        const auto *dsTexture = dsView->gpuTexture.get();
+        const VkImageAspectFlags aspects = VK_IMAGE_ASPECT_DEPTH_BIT | (hasStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+        if (!dsView->vkImageView || !dsTexture->vkImage || dsTexture->swapchain ||
+            dsTexture->externalVKImage || !dsTexture->memoryAllocated ||
+            dsTexture->type != TextureType::TEX2D || dsView->type != TextureType::TEX2D ||
+            dsTexture->flags != TextureFlagBit::NONE || static_cast<VkSampleCountFlagBits>(dsTexture->samples) != signature.samples ||
+            dsTexture->mipLevels != 1 || dsTexture->arrayLayers != 1 || dsTexture->depth != 1 ||
+            dsTexture->aspectMask != aspects || !(dsTexture->usage & TextureUsageBit::DEPTH_STENCIL_ATTACHMENT) ||
+            dsView->baseLevel || dsView->levelCount != 1 || dsView->baseLayer || dsView->layerCount != 1 ||
+            dsView->basePlane || dsView->planeCount != (hasStencil ? 2U : 1U) ||
+            dsView->format != dsTexture->format || mapVkFormat(dsView->format, gpuDevice) != signature.depthFormat ||
+            dsTexture->width != texture->width || dsTexture->height != texture->height) return false;
+    }
+
+    const auto *dsResolveView = _curGPUFBO->gpuDepthStencilResolveView.get();
+    if (hasDepthResolve != (dsResolveView != nullptr)) return false;
+    if (hasDepthResolve) {
+        if (!dsResolveView->gpuTexture || !dsView || hasStencil) return false;
+        const auto *dsResolveTexture = dsResolveView->gpuTexture.get();
+        if (!dsResolveView->vkImageView || !dsResolveTexture->vkImage || dsResolveTexture->vkImage == dsView->gpuTexture->vkImage ||
+            dsResolveTexture->swapchain || dsResolveTexture->externalVKImage || !dsResolveTexture->memoryAllocated ||
+            dsResolveTexture->type != TextureType::TEX2D || dsResolveView->type != TextureType::TEX2D ||
+            dsResolveTexture->flags != TextureFlagBit::NONE || dsResolveTexture->samples != SampleCount::X1 ||
+            dsResolveTexture->mipLevels != 1 || dsResolveTexture->arrayLayers != 1 || dsResolveTexture->depth != 1 ||
+            dsResolveTexture->aspectMask != VK_IMAGE_ASPECT_DEPTH_BIT || !(dsResolveTexture->usage & TextureUsageBit::DEPTH_STENCIL_ATTACHMENT) ||
+            dsResolveView->baseLevel || dsResolveView->levelCount != 1 || dsResolveView->baseLayer || dsResolveView->layerCount != 1 ||
+            dsResolveView->basePlane || dsResolveView->planeCount != 1 || dsResolveView->format != dsResolveTexture->format ||
+            mapVkFormat(dsResolveView->format, gpuDevice) != signature.depthFormat ||
+            dsResolveTexture->width != texture->width || dsResolveTexture->height != texture->height) return false;
+    }
+
+    try {
+        VKRenderingInfoContract::Input input;
+        input.signature = signature;
+        input.renderArea = area;
+        input.colors.resize(1);
+        auto &attachment = input.colors[0];
+        attachment.description.format = signature.colorFormats[0];
+        attachment.description.samples = signature.samples;
+        attachment.description.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachment.description.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attachment.binding.imageView = view->vkImageView;
+        attachment.binding.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        attachment.clear = clear;
+        if (hasColorResolve) {
+            attachment.binding.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+            attachment.binding.resolveImageView = resolveView->vkImageView;
+            attachment.binding.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
+
+        if (hasDepth) {
+            VKRenderingInfoContract::AttachmentInput ds;
+            const auto &description = _curGPURenderPass->depthStencilAttachment;
+            ds.description.format = signature.depthFormat;
+            ds.description.samples = signature.samples;
+            ds.description.loadOp = mapVkLoadOp(description.depthLoadOp);
+            ds.description.storeOp = mapVkStoreOp(description.depthStoreOp);
+            ds.description.stencilLoadOp = mapVkLoadOp(description.stencilLoadOp);
+            ds.description.stencilStoreOp = mapVkStoreOp(description.stencilStoreOp);
+            ds.binding.imageView = dsView->vkImageView;
+            ds.binding.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            if (hasDepthResolve) {
+                ds.binding.resolveMode = _curGPURenderPass->depthStencilResolveModes[0].depth;
+                ds.binding.resolveImageView = dsResolveView->vkImageView;
+                ds.binding.resolveImageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            }
+            ds.clear = *depthStencilClear;
+            input.depth = ds;
+            if (hasStencil) input.stencil = ds;
+        }
+
+        VKRenderingTransitionContract::Input transition;
+        transition.image = texture->vkImage;
+        transition.range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        // CLEAR with Classic initialLayout=UNDEFINED discards previous contents.
+        // Preserve broad memory/execution ordering; this is not M4-B narrowing.
+        transition.before = {VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                             VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+        transition.during = {VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT};
+        transition.after = {VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                            VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+        bool resolveReady = true;
+        if (hasColorResolve) {
+            auto resolveTransition = transition;
+            resolveTransition.image = resolveView->gpuTexture->vkImage;
+            resolveReady = _dynamicResolveTransition.build(resolveTransition);
+        } else {
+            _dynamicResolveTransition.reset();
+        }
+        bool depthStencilReady = true;
+        bool depthResolveReady = true;
+        if (hasDepth) {
+            auto dsTransition = transition;
+            dsTransition.image = dsView->gpuTexture->vkImage;
+            dsTransition.range.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | (hasStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+            dsTransition.during = {VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT};
+            dsTransition.after.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            if (hasDepthResolve) {
+                // Fixed-function depth resolve uses COLOR_ATTACHMENT_OUTPUT
+                // and COLOR_ATTACHMENT access masks, in addition to D/S
+                // load/store and test access in EARLY/LATE_FRAGMENT_TESTS.
+                dsTransition.during.stages |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                dsTransition.during.accesses |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+            }
+            depthStencilReady = _dynamicDepthStencilTransition.build(dsTransition);
+            if (hasDepthResolve) {
+                dsTransition.image = dsResolveView->gpuTexture->vkImage;
+                dsTransition.during.accesses |= VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                depthResolveReady = _dynamicDepthStencilResolveTransition.build(dsTransition);
+            } else {
+                _dynamicDepthStencilResolveTransition.reset();
+            }
+        } else {
+            _dynamicDepthStencilTransition.reset();
+            _dynamicDepthStencilResolveTransition.reset();
+        }
+        if (!_dynamicRenderingInfo.build(input) || !_dynamicTransition.build(transition) || !resolveReady || !depthStencilReady || !depthResolveReady) {
+            _dynamicRenderingInfo.reset();
+            _dynamicTransition.reset();
+            _dynamicResolveTransition.reset();
+            _dynamicDepthStencilTransition.reset();
+            _dynamicDepthStencilResolveTransition.reset();
+            return false;
+        }
+    } catch (...) {
+        _dynamicRenderingInfo.reset();
+        _dynamicTransition.reset();
+        _dynamicResolveTransition.reset();
+        _dynamicDepthStencilTransition.reset();
+        _dynamicDepthStencilResolveTransition.reset();
+        CC_LOG_WARNING("Dynamic attachment preparation failed; using Classic.");
+        return false;
+    }
+    const auto &pre = _dynamicTransition.pre();
+    cmdPipelineBarrier(gpuDevice, _gpuCommandBuffer->vkCommandBuffer, pre.srcStages, pre.dstStages,
+                       pre.flags, 0, nullptr, 0, nullptr, 1, &pre.barrier);
+    if (_dynamicResolveTransition.ready()) {
+        const auto &resolvePre = _dynamicResolveTransition.pre();
+        cmdPipelineBarrier(gpuDevice, _gpuCommandBuffer->vkCommandBuffer, resolvePre.srcStages, resolvePre.dstStages,
+                           resolvePre.flags, 0, nullptr, 0, nullptr, 1, &resolvePre.barrier);
+    }
+    if (_dynamicDepthStencilTransition.ready()) {
+        const auto &dsPre = _dynamicDepthStencilTransition.pre();
+        cmdPipelineBarrier(gpuDevice, _gpuCommandBuffer->vkCommandBuffer, dsPre.srcStages, dsPre.dstStages,
+                           dsPre.flags, 0, nullptr, 0, nullptr, 1, &dsPre.barrier);
+    }
+    if (_dynamicDepthStencilResolveTransition.ready()) {
+        const auto &dsPre = _dynamicDepthStencilResolveTransition.pre();
+        cmdPipelineBarrier(gpuDevice, _gpuCommandBuffer->vkCommandBuffer, dsPre.srcStages, dsPre.dstStages,
+                           dsPre.flags, 0, nullptr, 0, nullptr, 1, &dsPre.barrier);
+    }
+    vkCmdBeginRendering(_gpuCommandBuffer->vkCommandBuffer, &_dynamicRenderingInfo.info());
+    return true;
+}
+
 void CCVKCommandBuffer::endRenderPass() {
+    if (_skipRenderPass) {
+        _skipRenderPass = false;
+        _curGPUFBO = nullptr;
+        _curGPURenderPass = nullptr;
+        return;
+    }
     CC_ASSERT(_gpuCommandBuffer->began);
-    vkCmdEndRenderPass(_gpuCommandBuffer->vkCommandBuffer);
+    if (_dynamicRenderPass) {
+        vkCmdEndRendering(_gpuCommandBuffer->vkCommandBuffer);
+        const auto &post = _dynamicTransition.post();
+        cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), _gpuCommandBuffer->vkCommandBuffer,
+                           post.srcStages, post.dstStages, post.flags, 0, nullptr, 0, nullptr, 1, &post.barrier);
+        if (_dynamicResolveTransition.ready()) {
+            const auto &resolvePost = _dynamicResolveTransition.post();
+            cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), _gpuCommandBuffer->vkCommandBuffer,
+                               resolvePost.srcStages, resolvePost.dstStages, resolvePost.flags, 0, nullptr, 0, nullptr, 1, &resolvePost.barrier);
+        }
+        if (_dynamicDepthStencilTransition.ready()) {
+            const auto &dsPost = _dynamicDepthStencilTransition.post();
+            cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), _gpuCommandBuffer->vkCommandBuffer,
+                               dsPost.srcStages, dsPost.dstStages, dsPost.flags, 0, nullptr, 0, nullptr, 1, &dsPost.barrier);
+        }
+        if (_dynamicDepthStencilResolveTransition.ready()) {
+            const auto &dsPost = _dynamicDepthStencilResolveTransition.post();
+            cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), _gpuCommandBuffer->vkCommandBuffer,
+                               dsPost.srcStages, dsPost.dstStages, dsPost.flags, 0, nullptr, 0, nullptr, 1, &dsPost.barrier);
+        }
+        _dynamicRenderPass = false;
+        _dynamicRenderingInfo.reset();
+        _dynamicTransition.reset();
+        _dynamicResolveTransition.reset();
+        _dynamicDepthStencilTransition.reset();
+        _dynamicDepthStencilResolveTransition.reset();
+    } else {
+        vkCmdEndRenderPass(_gpuCommandBuffer->vkCommandBuffer);
+    }
 
     auto *device = CCVKDevice::getInstance();
     CCVKGPUDevice *gpuDevice = device->gpuDevice();
@@ -226,21 +569,24 @@ void CCVKCommandBuffer::endRenderPass() {
     if (_curGPURenderPass->depthStencilAttachment.format != Format::UNKNOWN) {
         _curGPUFBO->gpuDepthStencilView->gpuTexture->currentAccessTypes = _curGPURenderPass->getBarrier(colorAttachmentCount, gpuDevice)->nextAccesses;
     }
+    if (_curGPURenderPass->depthStencilResolveAttachment.format != Format::UNKNOWN && _curGPUFBO->gpuDepthStencilResolveView) {
+        _curGPUFBO->gpuDepthStencilResolveView->gpuTexture->currentAccessTypes = _curGPURenderPass->getBarrier(colorAttachmentCount + 1, gpuDevice)->nextAccesses;
+    }
 
     _curGPUFBO = nullptr;
 
     if constexpr (!ENABLE_GRAPH_AUTO_BARRIER) {
 #if BARRIER_DEDUCTION_LEVEL >= BARRIER_DEDUCTION_LEVEL_BASIC
         // guard against WAR hazard
-        vkCmdPipelineBarrier(_gpuCommandBuffer->vkCommandBuffer,
-                             VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 0, nullptr);
+        cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), _gpuCommandBuffer->vkCommandBuffer,
+                           VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 0, nullptr);
 #endif
     } else {
         const auto &dependencies = _curGPURenderPass->dependencies;
         if (!dependencies.empty()) {
             const auto &rearBarrier = _curGPURenderPass->dependencies.back();
-            //pipelineBarrier(rearBarrier.generalBarrier, rearBarrier.bufferBarriers, rearBarrier.buffers, rearBarrier.bufferBarrierCount, rearBarrier.textureBarriers, rearBarrier.textures, rearBarrier.textureBarrierCount);
+            // pipelineBarrier(rearBarrier.generalBarrier, rearBarrier.bufferBarriers, rearBarrier.buffers, rearBarrier.bufferBarrierCount, rearBarrier.textureBarriers, rearBarrier.textures, rearBarrier.textureBarrierCount);
         }
     }
 }
@@ -294,11 +640,36 @@ void CCVKCommandBuffer::endMarker() {
 
 void CCVKCommandBuffer::bindPipelineState(PipelineState *pso) {
     CCVKGPUPipelineState *gpuPipelineState = static_cast<CCVKPipelineState *>(pso)->gpuPipelineState();
+    _gpuCommandBuffer->retain(gpuPipelineState);
 
-    if (_curGPUPipelineState != gpuPipelineState) {
+    if (gpuPipelineState->bindPoint == PipelineBindPoint::GRAPHICS) {
+        _curGPUPipelineState = gpuPipelineState;
+        bindCurrentGraphicsPipeline();
+    } else if (_curGPUPipelineState != gpuPipelineState) {
         vkCmdBindPipeline(_gpuCommandBuffer->vkCommandBuffer, VK_PIPELINE_BIND_POINTS[toNumber(gpuPipelineState->bindPoint)], gpuPipelineState->vkPipeline);
         _curGPUPipelineState = gpuPipelineState;
     }
+}
+
+bool CCVKCommandBuffer::bindCurrentGraphicsPipeline() {
+    if (!_curGPUPipelineState || _curGPUPipelineState->bindPoint != PipelineBindPoint::GRAPHICS) return false;
+    const auto *pso = _curGPUPipelineState.get();
+    VkPipeline pipeline = pso->vkPipeline;
+    if (_dynamicRenderPass) {
+        if (!pso->renderingMetadata.valid ||
+            pso->renderingMetadata.signature != _dynamicRenderingInfo.input().signature ||
+            pso->vkDynamicPipeline == VK_NULL_HANDLE || pso->dynamicPipelineCreationFailed) {
+            CC_LOG_WARNING("Dynamic draw rejected: missing matching pipeline variant.");
+            return false;
+        }
+        pipeline = pso->vkDynamicPipeline;
+    }
+    if (pipeline == VK_NULL_HANDLE) return false;
+    if (_boundGraphicsPipeline != pipeline) {
+        vkCmdBindPipeline(_gpuCommandBuffer->vkCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        _boundGraphicsPipeline = pipeline;
+    }
+    return true;
 }
 
 void CCVKCommandBuffer::bindDescriptorSet(uint32_t set, DescriptorSet *descriptorSet, uint32_t dynamicOffsetCount, const uint32_t *dynamicOffsets) {
@@ -320,6 +691,10 @@ void CCVKCommandBuffer::bindDescriptorSet(uint32_t set, DescriptorSet *descripto
 
 void CCVKCommandBuffer::bindInputAssembler(InputAssembler *ia) {
     CCVKGPUInputAssembler *gpuInputAssembler = static_cast<CCVKInputAssembler *>(ia)->gpuInputAssembler();
+    _gpuCommandBuffer->retain(gpuInputAssembler);
+    for (const auto &view : gpuInputAssembler->gpuVertexBuffers) _gpuCommandBuffer->retain(view.get());
+    _gpuCommandBuffer->retain(gpuInputAssembler->gpuIndexBuffer.get());
+    _gpuCommandBuffer->retain(gpuInputAssembler->gpuIndirectBuffer.get());
 
     if (_curGPUInputAssembler != gpuInputAssembler) {
         // buffers may be rebuilt(e.g. resize event) without IA's acknowledge
@@ -333,12 +708,20 @@ void CCVKCommandBuffer::bindInputAssembler(InputAssembler *ia) {
         for (uint32_t i = 0U; i < vbCount; ++i) {
             gpuInputAssembler->vertexBuffers[i] = gpuInputAssembler->gpuVertexBuffers[i]->gpuBuffer->vkBuffer;
             gpuInputAssembler->vertexBufferOffsets[i] = gpuInputAssembler->gpuVertexBuffers[i]->getStartOffset(gpuDevice->curBackBufferIndex);
+            _gpuCommandBuffer->recordBufferRange(gpuInputAssembler->gpuVertexBuffers[i]->gpuBuffer.get(),
+                                                 gpuInputAssembler->vertexBufferOffsets[i], gpuInputAssembler->gpuVertexBuffers[i]->range);
         }
 
-        vkCmdBindVertexBuffers(_gpuCommandBuffer->vkCommandBuffer, 0, vbCount,
-                               gpuInputAssembler->vertexBuffers.data(), gpuInputAssembler->vertexBufferOffsets.data());
+        // Procedural draws may use gl_VertexIndex without any vertex buffers.
+        // Vulkan forbids bindingCount=0; there is no binding to update here.
+        if (vbCount) {
+            vkCmdBindVertexBuffers(_gpuCommandBuffer->vkCommandBuffer, 0, vbCount,
+                                   gpuInputAssembler->vertexBuffers.data(), gpuInputAssembler->vertexBufferOffsets.data());
+        }
 
         if (gpuInputAssembler->gpuIndexBuffer) {
+            const auto &view = gpuInputAssembler->gpuIndexBuffer;
+            _gpuCommandBuffer->recordBufferRange(view->gpuBuffer.get(), view->getStartOffset(gpuDevice->curBackBufferIndex), view->range);
             vkCmdBindIndexBuffer(_gpuCommandBuffer->vkCommandBuffer, gpuInputAssembler->gpuIndexBuffer->gpuBuffer->vkBuffer,
                                  gpuInputAssembler->gpuIndexBuffer->gpuBuffer->getStartOffset(gpuDevice->curBackBufferIndex),
                                  gpuInputAssembler->gpuIndexBuffer->gpuBuffer->stride == 4 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
@@ -449,6 +832,11 @@ void CCVKCommandBuffer::setStencilCompareMask(StencilFace face, uint32_t referen
 }
 
 void CCVKCommandBuffer::nextSubpass() {
+    if (_skipRenderPass) return;
+    if (_dynamicRenderPass) {
+        CC_LOG_WARNING("Dynamic pass has no next subpass.");
+        return;
+    }
     vkCmdNextSubpass(_gpuCommandBuffer->vkCommandBuffer, _secondaryRP ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE);
     ++_currentSubPass;
     CC_ASSERT(_currentSubPass < _curGPURenderPass->subpasses.size());
@@ -456,7 +844,10 @@ void CCVKCommandBuffer::nextSubpass() {
 }
 
 void CCVKCommandBuffer::draw(const DrawInfo &info) {
+    if (_skipRenderPass) return;
+    if (!_curGPUInputAssembler || !bindCurrentGraphicsPipeline()) return;
     CC_PROFILE(CCVKCmdBufDraw);
+    refreshDescriptorSetVersions();
     if (_firstDirtyDescriptorSet < _curGPUDescriptorSets.size()) {
         bindDescriptorSets(VK_PIPELINE_BIND_POINT_GRAPHICS);
     }
@@ -467,6 +858,7 @@ void CCVKCommandBuffer::draw(const DrawInfo &info) {
         uint32_t drawInfoCount = gpuIndirectBuffer->range / gpuIndirectBuffer->gpuBuffer->stride;
         CCVKGPUDevice *gpuDevice = CCVKDevice::getInstance()->gpuDevice();
         VkDeviceSize offset = gpuIndirectBuffer->getStartOffset(gpuDevice->curBackBufferIndex);
+        _gpuCommandBuffer->recordBufferRange(gpuIndirectBuffer->gpuBuffer.get(), offset, gpuIndirectBuffer->range);
         if (gpuDevice->useMultiDrawIndirect) {
             if (gpuIndirectBuffer->gpuBuffer->isDrawIndirectByIndex) {
                 vkCmdDrawIndexedIndirect(_gpuCommandBuffer->vkCommandBuffer,
@@ -507,7 +899,7 @@ void CCVKCommandBuffer::draw(const DrawInfo &info) {
         if (hasIndexBuffer) {
             if (info.indexCount > 0) {
                 vkCmdDrawIndexed(_gpuCommandBuffer->vkCommandBuffer, info.indexCount, instanceCount,
-                             info.firstIndex, info.vertexOffset, info.firstInstance);
+                                 info.firstIndex, info.vertexOffset, info.firstInstance);
             }
         } else {
             vkCmdDraw(_gpuCommandBuffer->vkCommandBuffer, info.vertexCount, instanceCount,
@@ -536,13 +928,28 @@ void CCVKCommandBuffer::draw(const DrawInfo &info) {
 }
 
 void CCVKCommandBuffer::execute(CommandBuffer *const *cmdBuffs, uint32_t count) {
-    if (!count) return;
+    if (!count || _skipRenderPass) return;
+    if (_dynamicRenderPass) {
+        CC_LOG_WARNING("Dynamic inline pass cannot execute Classic secondary command buffers.");
+        return;
+    }
     _vkCommandBuffers.resize(count);
 
     uint32_t validCount = 0U;
     for (uint32_t i = 0U; i < count; ++i) {
         auto *cmdBuff = static_cast<CCVKCommandBuffer *>(cmdBuffs[i]);
         if (!cmdBuff->_pendingQueue.empty()) {
+            if (cmdBuff->_skipSecondaryExecution || !cmdBuff->pendingWSIUsageValid() || !cmdBuff->pendingRecordingValid()) {
+                cmdBuff->_pendingQueue.pop();
+                if (!cmdBuff->_pendingWSIUsage.empty()) cmdBuff->_pendingWSIUsage.pop();
+                if (!cmdBuff->_pendingRecordings.empty()) cmdBuff->_pendingRecordings.pop();
+                continue;
+            }
+            const auto &usage = cmdBuff->_pendingWSIUsage.front();
+            _recordedWSIUsage.insert(_recordedWSIUsage.end(), usage.begin(), usage.end());
+            cmdBuff->_pendingWSIUsage.pop();
+            _gpuCommandBuffer->recording->secondaryRecordings.push_back(cmdBuff->_pendingRecordings.front());
+            cmdBuff->_pendingRecordings.pop();
             _vkCommandBuffers[validCount++] = cmdBuff->_pendingQueue.front();
             cmdBuff->_pendingQueue.pop();
 
@@ -560,11 +967,16 @@ void CCVKCommandBuffer::execute(CommandBuffer *const *cmdBuffs, uint32_t count) 
 void CCVKCommandBuffer::updateBuffer(Buffer *buffer, const void *data, uint32_t size) {
     CC_PROFILE(CCVKCmdBufUpdateBuffer);
     CCVKGPUBuffer *gpuBuffer = static_cast<CCVKBuffer *>(buffer)->gpuBuffer();
+    _gpuCommandBuffer->retain(gpuBuffer);
     cmdFuncCCVKUpdateBuffer(CCVKDevice::getInstance(), gpuBuffer, data, size, _gpuCommandBuffer);
 }
 
 void CCVKCommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, Texture *texture, const BufferTextureCopy *regions, uint32_t count) {
-    cmdFuncCCVKCopyBuffersToTexture(CCVKDevice::getInstance(), buffers, static_cast<CCVKTexture *>(texture)->gpuTexture(), regions, count, _gpuCommandBuffer);
+    auto *gpuTexture = static_cast<CCVKTexture *>(texture)->gpuTexture();
+    _gpuCommandBuffer->retain(gpuTexture);
+    if (gpuTexture->swapchain && !gpuTexture->hasRenderableSwapchainImage()) return;
+    recordSwapchainUsage(gpuTexture->swapchain);
+    cmdFuncCCVKCopyBuffersToTexture(CCVKDevice::getInstance(), buffers, gpuTexture, regions, count, _gpuCommandBuffer);
 }
 
 void CCVKCommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) {
@@ -573,13 +985,19 @@ void CCVKCommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTexture,
     VkImage srcImage = VK_NULL_HANDLE;
     VkImage dstImage = VK_NULL_HANDLE;
 
-    auto getImage = [](Texture * texture) -> auto {
+    auto getImage = [this](Texture *texture) -> auto {
         CCVKGPUTexture *gpuTexture = static_cast<CCVKTexture *>(texture)->gpuTexture();
+        _gpuCommandBuffer->retain(gpuTexture);
+        if (gpuTexture->swapchain && !gpuTexture->hasRenderableSwapchainImage()) {
+            return std::pair{gpuTexture->aspectMask, VkImage{VK_NULL_HANDLE}};
+        }
+        recordSwapchainUsage(gpuTexture->swapchain);
         return gpuTexture->swapchain ? std::pair{gpuTexture->aspectMask, gpuTexture->swapchainVkImages[gpuTexture->swapchain->curImageIndex]} : std::pair{gpuTexture->aspectMask, gpuTexture->vkImage};
     };
 
     std::tie(srcAspectMask, srcImage) = getImage(srcTexture);
     std::tie(dstAspectMask, dstImage) = getImage(dstTexture);
+    if (!srcImage || !dstImage) return;
 
     ccstd::vector<VkImageResolve> resolveRegions(count);
     for (uint32_t i = 0U; i < count; ++i) {
@@ -617,13 +1035,19 @@ void CCVKCommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture, co
     VkImage srcImage = VK_NULL_HANDLE;
     VkImage dstImage = VK_NULL_HANDLE;
 
-    auto getImage = [](Texture * texture) -> auto {
+    auto getImage = [this](Texture *texture) -> auto {
         CCVKGPUTexture *gpuTexture = static_cast<CCVKTexture *>(texture)->gpuTexture();
+        _gpuCommandBuffer->retain(gpuTexture);
+        if (gpuTexture->swapchain && !gpuTexture->hasRenderableSwapchainImage()) {
+            return std::pair{gpuTexture->aspectMask, VkImage{VK_NULL_HANDLE}};
+        }
+        recordSwapchainUsage(gpuTexture->swapchain);
         return gpuTexture->swapchain ? std::pair{gpuTexture->aspectMask, gpuTexture->swapchainVkImages[gpuTexture->swapchain->curImageIndex]} : std::pair{gpuTexture->aspectMask, gpuTexture->vkImage};
     };
 
     std::tie(srcAspectMask, srcImage) = getImage(srcTexture);
     std::tie(dstAspectMask, dstImage) = getImage(dstTexture);
+    if (!srcImage || !dstImage) return;
 
     ccstd::vector<VkImageCopy> copyRegions(count, VkImageCopy{});
     for (uint32_t i = 0U; i < count; ++i) {
@@ -664,16 +1088,22 @@ void CCVKCommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture, co
     VkImageLayout dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
     CCVKGPUTexture *gpuTextureSrc = static_cast<CCVKTexture *>(srcTexture)->gpuTexture();
+    _gpuCommandBuffer->retain(gpuTextureSrc);
     srcAspectMask = gpuTextureSrc->aspectMask;
     if (gpuTextureSrc->swapchain) {
+        if (!gpuTextureSrc->hasRenderableSwapchainImage()) return;
+        recordSwapchainUsage(gpuTextureSrc->swapchain);
         srcImage = gpuTextureSrc->swapchainVkImages[gpuTextureSrc->swapchain->curImageIndex];
     } else {
         srcImage = gpuTextureSrc->vkImage;
     }
 
     CCVKGPUTexture *gpuTextureDst = static_cast<CCVKTexture *>(dstTexture)->gpuTexture();
+    _gpuCommandBuffer->retain(gpuTextureDst);
     dstAspectMask = gpuTextureDst->aspectMask;
     if (gpuTextureDst->swapchain) {
+        if (!gpuTextureDst->hasRenderableSwapchainImage()) return;
+        recordSwapchainUsage(gpuTextureDst->swapchain);
         dstImage = gpuTextureDst->swapchainVkImages[gpuTextureDst->swapchain->curImageIndex];
 
         VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -685,9 +1115,9 @@ void CCVKCommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture, co
         barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         barrier.subresourceRange.levelCount = barrier.subresourceRange.layerCount = 1;
 
-        vkCmdPipelineBarrier(_gpuCommandBuffer->vkCommandBuffer,
-                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_DEPENDENCY_BY_REGION_BIT,
-                             0, nullptr, 0, nullptr, 1, &barrier);
+        cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), _gpuCommandBuffer->vkCommandBuffer,
+                           VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_DEPENDENCY_BY_REGION_BIT,
+                           0, nullptr, 0, nullptr, 1, &barrier);
     } else {
         dstImage = gpuTextureDst->vkImage;
     }
@@ -735,9 +1165,9 @@ void CCVKCommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture, co
         barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         barrier.subresourceRange.levelCount = barrier.subresourceRange.layerCount = 1;
 
-        vkCmdPipelineBarrier(_gpuCommandBuffer->vkCommandBuffer,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_DEPENDENCY_BY_REGION_BIT,
-                             0, nullptr, 0, nullptr, 1, &barrier);
+        cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), _gpuCommandBuffer->vkCommandBuffer,
+                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_DEPENDENCY_BY_REGION_BIT,
+                           0, nullptr, 0, nullptr, 1, &barrier);
     }
 }
 
@@ -746,11 +1176,24 @@ void CCVKCommandBuffer::selfDependency() {
     barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
-    vkCmdPipelineBarrier(_gpuCommandBuffer->vkCommandBuffer,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                         VK_DEPENDENCY_BY_REGION_BIT,
-                         1, &barrier, 0, nullptr, 0, nullptr);
+    cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), _gpuCommandBuffer->vkCommandBuffer,
+                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                       VK_DEPENDENCY_BY_REGION_BIT,
+                       1, &barrier, 0, nullptr, 0, nullptr);
+}
+
+void CCVKCommandBuffer::refreshDescriptorSetVersions() {
+    // A DescriptorSet facade can keep its identity while update replaces its
+    // Vulkan version, including between two dispatches/draws in one recording.
+    const auto slot = CCVKDevice::getInstance()->gpuDevice()->curBackBufferIndex;
+    const auto count = std::min(_curGPUDescriptorSets.size(), _curGPUPipelineState->gpuPipelineLayout->setLayouts.size());
+    for (uint32_t i = 0; i < count; ++i) {
+        if (_curGPUDescriptorSets[i] &&
+            _curVkDescriptorSets[i] != _curGPUDescriptorSets[i]->instances[slot].vkDescriptorSet) {
+            _firstDirtyDescriptorSet = std::min(_firstDirtyDescriptorSet, i);
+        }
+    }
 }
 
 void CCVKCommandBuffer::bindDescriptorSets(VkPipelineBindPoint bindPoint) {
@@ -763,16 +1206,40 @@ void CCVKCommandBuffer::bindDescriptorSets(VkPipelineBindPoint bindPoint) {
 
     uint32_t dirtyDescriptorSetCount = descriptorSetCount - _firstDirtyDescriptorSet;
     for (uint32_t i = _firstDirtyDescriptorSet; i < descriptorSetCount; ++i) {
-        if (_curGPUDescriptorSets[i]) {
-            const CCVKGPUDescriptorSet::Instance &instance = _curGPUDescriptorSets[i]->instances[gpuDevice->curBackBufferIndex];
-            _curVkDescriptorSets[i] = instance.vkDescriptorSet;
-        } else {
-            _curVkDescriptorSets[i] = pipelineLayout->setLayouts[i]->defaultDescriptorSet;
-        }
         uint32_t count = dynamicOffsetOffsets[i + 1] - dynamicOffsetOffsets[i];
         // CC_ASSERT(_curDynamicOffsetCounts[i] >= count);
         count = std::min(count, utils::toUint(_curDynamicOffsetsArray[i].size()));
         if (count > 0) memcpy(&_curDynamicOffsets[dynamicOffsetOffsets[i]], _curDynamicOffsetsArray[i].data(), count * sizeof(uint32_t));
+        if (_curGPUDescriptorSets[i]) {
+            const auto *set = _curGPUDescriptorSets[i].get();
+            _gpuCommandBuffer->retain(set);
+            for (const auto &descriptor : set->gpuDescriptors) {
+                _gpuCommandBuffer->retain(descriptor.gpuBufferView.get());
+                _gpuCommandBuffer->retain(descriptor.gpuTextureView.get());
+                _gpuCommandBuffer->retain(descriptor.gpuSampler.get());
+            }
+            const CCVKGPUDescriptorSet::Instance &instance = _curGPUDescriptorSets[i]->instances[gpuDevice->curBackBufferIndex];
+            _gpuCommandBuffer->retain(instance.version.get());
+            for (uint32_t d = 0; d < set->gpuDescriptors.size(); ++d) {
+                const auto &view = set->gpuDescriptors[d].gpuBufferView;
+                if (!view || !view->gpuBuffer->instanceSize || !hasFlag(DESCRIPTOR_BUFFER_TYPE, set->gpuDescriptors[d].type)) continue;
+                const auto &bufferInfo = instance.descriptorInfos[d].buffer;
+                VkDeviceSize dynamicOffset = 0;
+                uint32_t element = 0;
+                const auto &dynamicBindings = set->gpuLayout->dynamicBindings;
+                for (uint32_t k = 0; k < dynamicBindings.size(); ++k) {
+                    element = (k && dynamicBindings[k] == dynamicBindings[k - 1]) ? element + 1 : 0;
+                    if (d == set->gpuLayout->descriptorIndices[dynamicBindings[k]] + element) {
+                        dynamicOffset = _curDynamicOffsets[dynamicOffsetOffsets[i] + k];
+                        break;
+                    }
+                }
+                _gpuCommandBuffer->recordBufferRange(view->gpuBuffer.get(), bufferInfo.offset + dynamicOffset, bufferInfo.range);
+            }
+            _curVkDescriptorSets[i] = instance.vkDescriptorSet;
+        } else {
+            _curVkDescriptorSets[i] = pipelineLayout->setLayouts[i]->defaultDescriptorSet;
+        }
     }
 
     uint32_t dynamicOffsetStartIndex = dynamicOffsetOffsets[_firstDirtyDescriptorSet];
@@ -788,6 +1255,7 @@ void CCVKCommandBuffer::bindDescriptorSets(VkPipelineBindPoint bindPoint) {
 }
 
 void CCVKCommandBuffer::dispatch(const DispatchInfo &info) {
+    refreshDescriptorSetVersions();
     if (_firstDirtyDescriptorSet < _curGPUDescriptorSets.size()) {
         bindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE);
     }
@@ -795,6 +1263,10 @@ void CCVKCommandBuffer::dispatch(const DispatchInfo &info) {
     if (info.indirectBuffer) {
         CCVKGPUDevice *gpuDevice = CCVKDevice::getInstance()->gpuDevice();
         auto *indirectBuffer = static_cast<CCVKBuffer *>(info.indirectBuffer);
+        _gpuCommandBuffer->retain(indirectBuffer->gpuBuffer());
+        _gpuCommandBuffer->recordBufferRange(indirectBuffer->gpuBuffer(),
+                                             indirectBuffer->gpuBufferView()->getStartOffset(gpuDevice->curBackBufferIndex) + info.indirectOffset,
+                                             sizeof(VkDispatchIndirectCommand));
         vkCmdDispatchIndirect(_gpuCommandBuffer->vkCommandBuffer, indirectBuffer->gpuBuffer()->vkBuffer,
                               indirectBuffer->gpuBufferView()->getStartOffset(gpuDevice->curBackBufferIndex) + info.indirectOffset);
     } else {
@@ -816,24 +1288,30 @@ void CCVKCommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const Buf
     ccstd::vector<VkEvent> scheduledEvents;
 
     auto signalEvent = [&](const GFXObject *obj, VkPipelineStageFlags stageMask) {
-        VkEvent event;
-        if (!_availableEvents.empty()) {
-            event = _availableEvents.front();
+        IntrusivePtr<CCVKGPUEvent> event;
+        const auto count = _availableEvents.size();
+        for (size_t i = 0; i < count; ++i) {
+            auto candidate = std::move(_availableEvents.front());
             _availableEvents.pop();
-        } else {
-            VkEventCreateInfo eventInfo = {
-                VK_STRUCTURE_TYPE_EVENT_CREATE_INFO,
-                nullptr,
-                0,
-            };
-            VkResult res = vkCreateEvent(CCVKDevice::getInstance()->gpuDevice()->vkDevice,
-                                         &eventInfo,
-                                         nullptr,
-                                         &event);
-            CC_ASSERT_EQ(res, VK_SUCCESS);
+            // Only the facade owns this reset event. Any active/pending/in-flight
+            // recording reference blocks reuse, including work in another slot.
+            if (candidate->getRefCount() == 1) {
+                event = std::move(candidate);
+                break;
+            }
+            _availableEvents.push(std::move(candidate));
         }
-        vkCmdSetEvent(_gpuCommandBuffer->vkCommandBuffer, event, stageMask);
-        _barrierEvents.insert({obj, event});
+        if (!event) {
+            event = new CCVKGPUEvent;
+            event->vkDevice = CCVKDevice::getInstance()->gpuDevice()->vkDevice;
+            VkEventCreateInfo eventInfo{VK_STRUCTURE_TYPE_EVENT_CREATE_INFO};
+            const auto result = vkCreateEvent(event->vkDevice, &eventInfo, nullptr, &event->vkEvent);
+            VK_CHECK(result);
+            if (result != VK_SUCCESS) return;
+        }
+        _gpuCommandBuffer->retain(event.get());
+        vkCmdSetEvent(_gpuCommandBuffer->vkCommandBuffer, event->vkEvent, stageMask);
+        _barrierEvents[obj] = std::move(event);
     };
 
     if (textureBarrierCount > 0) {
@@ -842,6 +1320,9 @@ void CCVKCommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const Buf
             const auto *gpuBarrier = ccBarrier->gpuBarrier();
             const auto *ccTexture = static_cast<const CCVKTexture *const>(textures[i]);
             auto *gpuTexture = ccTexture->gpuTexture();
+            _gpuCommandBuffer->retain(gpuTexture);
+            if (gpuTexture->swapchain && !gpuTexture->hasRenderableSwapchainImage()) continue;
+            recordSwapchainUsage(gpuTexture->swapchain);
 
             if (ccBarrier->getInfo().type == BarrierType::SPLIT_BEGIN) {
                 signalEvent(ccTexture, gpuBarrier->srcStageMask);
@@ -849,8 +1330,10 @@ void CCVKCommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const Buf
                 bool fullBarrier = ccBarrier->getInfo().type == BarrierType::FULL;
                 bool missed = _barrierEvents.find(ccTexture) == _barrierEvents.end();
                 if (!fullBarrier && !missed) {
-                    //CC_ASSERT(_barrierEvents.find(ccTexture) != _barrierEvents.end());
-                    VkEvent event = _barrierEvents.at(ccTexture);
+                    // CC_ASSERT(_barrierEvents.find(ccTexture) != _barrierEvents.end());
+                    const auto &eventOwner = _barrierEvents.at(ccTexture);
+                    _gpuCommandBuffer->retain(eventOwner.get());
+                    VkEvent event = eventOwner->vkEvent;
                     scheduledEvents.push_back(event);
 
                     gpuTexture->currentAccessTypes.assign(gpuBarrier->barrier.pNextAccesses, gpuBarrier->barrier.pNextAccesses + gpuBarrier->barrier.nextAccessCount);
@@ -867,7 +1350,6 @@ void CCVKCommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const Buf
                 } else {
                     gpuTexture->currentAccessTypes.assign(gpuBarrier->barrier.pNextAccesses, gpuBarrier->barrier.pNextAccesses + gpuBarrier->barrier.nextAccessCount);
                     fullImageBarriers.push_back(gpuBarrier->vkBarrier);
-                    fullImageBarriers.back().srcAccessMask = missed ? VK_IMAGE_LAYOUT_UNDEFINED : fullImageBarriers.back().srcAccessMask;
                     fullImageBarriers.back().subresourceRange.aspectMask = gpuTexture->aspectMask;
                     if (gpuTexture->swapchain) {
                         fullImageBarriers.back().image = gpuTexture->swapchainVkImages[gpuTexture->swapchain->curImageIndex];
@@ -887,15 +1369,18 @@ void CCVKCommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const Buf
             const auto *gpuBarrier = ccBarrier->gpuBarrier();
             const auto *ccBuffer = static_cast<const CCVKBuffer *const>(buffers[i]);
             auto *gpuBuffer = ccBuffer->gpuBuffer();
+            _gpuCommandBuffer->retain(gpuBuffer);
 
             if (ccBarrier->getInfo().type == BarrierType::SPLIT_BEGIN) {
                 signalEvent(ccBuffer, gpuBarrier->srcStageMask);
             } else {
                 bool fullBarrier = ccBarrier->getInfo().type == BarrierType::FULL;
-                bool missed = _barrierEvents.find(ccBuffer) != _barrierEvents.end();
+                bool missed = _barrierEvents.find(ccBuffer) == _barrierEvents.end();
                 if (!fullBarrier && !missed) {
                     CC_ASSERT(_barrierEvents.find(ccBuffer) != _barrierEvents.end());
-                    VkEvent event = _barrierEvents.at(ccBuffer);
+                    const auto &eventOwner = _barrierEvents.at(ccBuffer);
+                    _gpuCommandBuffer->retain(eventOwner.get());
+                    VkEvent event = eventOwner->vkEvent;
                     scheduledEvents.push_back(event);
 
                     gpuBuffer->currentAccessTypes.assign(gpuBarrier->barrier.pNextAccesses, gpuBarrier->barrier.pNextAccesses + gpuBarrier->barrier.nextAccessCount);
@@ -906,7 +1391,6 @@ void CCVKCommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const Buf
                 } else {
                     gpuBuffer->currentAccessTypes.assign(gpuBarrier->barrier.pNextAccesses, gpuBarrier->barrier.pNextAccesses + gpuBarrier->barrier.nextAccessCount);
                     fullBufferBarriers.push_back(gpuBarrier->vkBarrier);
-                    fullBufferBarriers.back().srcAccessMask = missed ? VK_IMAGE_LAYOUT_UNDEFINED : fullBufferBarriers.back().srcAccessMask;
                     fullBufferBarriers.back().buffer = gpuBuffer->vkBuffer;
                     fullSrcStageMask |= gpuBarrier->srcStageMask;
                     fullDstStageMask |= gpuBarrier->dstStageMask;
@@ -947,28 +1431,32 @@ void CCVKCommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const Buf
 
             for (size_t i = 0; i < splitImageBarriers.size(); ++i) { // NOLINT (range-based-for)
                 auto index = splitImageBarriers[i].first;
-                VkEvent event = _barrierEvents.at(textures[index]);
+                auto eventOwner = _barrierEvents.at(textures[index]);
+                _gpuCommandBuffer->retain(eventOwner.get());
+                VkEvent event = eventOwner->vkEvent;
                 const auto *ccBarrier = static_cast<const CCVKTextureBarrier *const>(textureBarriers[index]);
                 const auto *gpuBarrier = ccBarrier->gpuBarrier();
                 vkCmdResetEvent(_gpuCommandBuffer->vkCommandBuffer, event, gpuBarrier->dstStageMask);
                 _barrierEvents.erase(textures[index]);
-                _availableEvents.push(event);
+                _availableEvents.push(std::move(eventOwner));
             }
 
             for (size_t i = 0; i < splitBufferBarriers.size(); ++i) { // NOLINT (range-based-for)
                 auto index = splitBufferBarriers[i].first;
-                VkEvent event = _barrierEvents.at(buffers[index]);
+                auto eventOwner = _barrierEvents.at(buffers[index]);
+                _gpuCommandBuffer->retain(eventOwner.get());
+                VkEvent event = eventOwner->vkEvent;
                 const auto *ccBarrier = static_cast<const CCVKBufferBarrier *const>(bufferBarriers[index]);
                 const auto *gpuBarrier = ccBarrier->gpuBarrier();
                 vkCmdResetEvent(_gpuCommandBuffer->vkCommandBuffer, event, gpuBarrier->dstStageMask);
                 _barrierEvents.erase(buffers[index]);
-                _availableEvents.push(event);
+                _availableEvents.push(std::move(eventOwner));
             }
         }
 
         if (!fullBufferBarriers.empty() || !fullImageBarriers.empty()) {
-            vkCmdPipelineBarrier(_gpuCommandBuffer->vkCommandBuffer, fullSrcStageMask, fullDstStageMask, 0, 0, pMemoryBarrier,
-                                 fullBufferBarriers.size(), fullBufferBarriers.data(), fullImageBarriers.size(), fullImageBarriers.data());
+            cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), _gpuCommandBuffer->vkCommandBuffer, fullSrcStageMask, fullDstStageMask, 0, 0, pMemoryBarrier,
+                               fullBufferBarriers.size(), fullBufferBarriers.data(), fullImageBarriers.size(), fullImageBarriers.data());
         }
     }
 }
@@ -976,6 +1464,7 @@ void CCVKCommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const Buf
 void CCVKCommandBuffer::beginQuery(QueryPool *queryPool, uint32_t /*id*/) {
     auto *vkQueryPool = static_cast<CCVKQueryPool *>(queryPool);
     CCVKGPUQueryPool *gpuQueryPool = vkQueryPool->gpuQueryPool();
+    _gpuCommandBuffer->retain(gpuQueryPool);
     auto queryId = static_cast<uint32_t>(vkQueryPool->_ids.size());
 
     if (queryId < queryPool->getMaxQueryObjects()) {
@@ -986,6 +1475,7 @@ void CCVKCommandBuffer::beginQuery(QueryPool *queryPool, uint32_t /*id*/) {
 void CCVKCommandBuffer::endQuery(QueryPool *queryPool, uint32_t id) {
     auto *vkQueryPool = static_cast<CCVKQueryPool *>(queryPool);
     CCVKGPUQueryPool *gpuQueryPool = vkQueryPool->gpuQueryPool();
+    _gpuCommandBuffer->retain(gpuQueryPool);
     auto queryId = static_cast<uint32_t>(vkQueryPool->_ids.size());
 
     if (queryId < queryPool->getMaxQueryObjects()) {
@@ -997,6 +1487,7 @@ void CCVKCommandBuffer::endQuery(QueryPool *queryPool, uint32_t id) {
 void CCVKCommandBuffer::resetQueryPool(QueryPool *queryPool) {
     auto *vkQueryPool = static_cast<CCVKQueryPool *>(queryPool);
     CCVKGPUQueryPool *gpuQueryPool = vkQueryPool->gpuQueryPool();
+    _gpuCommandBuffer->retain(gpuQueryPool);
 
     vkCmdResetQueryPool(_gpuCommandBuffer->vkCommandBuffer, gpuQueryPool->vkPool, 0, queryPool->getMaxQueryObjects());
     vkQueryPool->_ids.clear();

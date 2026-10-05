@@ -53,21 +53,41 @@ void CCVKQueue::doDestroy() {
 void CCVKQueue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
     CCVKDevice *device = CCVKDevice::getInstance();
     _gpuQueue->commandBuffers.clear();
+    std::vector<std::shared_ptr<CCVKGPURecording>> recordings;
+    ccstd::vector<CCVKCommandBuffer *> selected;
 
 #if BARRIER_DEDUCTION_LEVEL >= BARRIER_DEDUCTION_LEVEL_BASIC
     device->gpuBarrierManager()->update(device->gpuTransportHub());
 #endif
     device->gpuBufferHub()->flush(device->gpuTransportHub());
+    device->prepareWSISubmit(_gpuQueue.get());
 
     if (!device->gpuTransportHub()->empty(false)) {
-        _gpuQueue->commandBuffers.push_back(device->gpuTransportHub()->packageForFlight(false));
+        _gpuQueue->commandBuffers.push_back(device->gpuTransportHub()->packageForFlight(false, recordings));
     }
 
     for (uint32_t i = 0U; i < count; ++i) {
         auto *cmdBuff = static_cast<CCVKCommandBuffer *>(cmdBuffs[i]);
         if (!cmdBuff->_pendingQueue.empty()) {
+            if (!cmdBuff->pendingWSIUsageValid()) {
+                cmdBuff->_pendingQueue.pop();
+                if (!cmdBuff->_pendingWSIUsage.empty()) cmdBuff->_pendingWSIUsage.pop();
+                if (!cmdBuff->_pendingRecordings.empty()) cmdBuff->_pendingRecordings.pop();
+                ++_gpuQueue->discardedWSICommandBuffers;
+                continue; // recorded before an abort/resize, never execute it
+            }
+            if (!cmdBuff->pendingRecordingValid()) {
+                cmdBuff->_pendingQueue.pop();
+                cmdBuff->_pendingWSIUsage.pop();
+                if (!cmdBuff->_pendingRecordings.empty()) cmdBuff->_pendingRecordings.pop();
+                ++_gpuQueue->discardedRecordingCommandBuffers;
+                continue;
+            }
+            // Repeated facade entries must not submit one one-time recording twice.
+            if (std::find(selected.begin(), selected.end(), cmdBuff) != selected.end()) continue;
             _gpuQueue->commandBuffers.push_back(cmdBuff->_pendingQueue.front());
-            cmdBuff->_pendingQueue.pop();
+            recordings.push_back(cmdBuff->_pendingRecordings.front());
+            selected.push_back(cmdBuff);
 
             _numDrawCalls += cmdBuff->_numDrawCalls;
             _numInstances += cmdBuff->_numInstances;
@@ -76,26 +96,47 @@ void CCVKQueue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
     }
 
     if (!device->gpuTransportHub()->empty(true)) {
-        _gpuQueue->commandBuffers.push_back(device->gpuTransportHub()->packageForFlight(true));
+        _gpuQueue->commandBuffers.push_back(device->gpuTransportHub()->packageForFlight(true, recordings));
     }
 
     size_t waitSemaphoreCount = _gpuQueue->lastSignaledSemaphores.size();
-    VkSemaphore signal = waitSemaphoreCount ? device->gpuSemaphorePool()->alloc() : VK_NULL_HANDLE;
-    _gpuQueue->submitStageMasks.resize(waitSemaphoreCount, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    ccstd::vector<VkSemaphore> signals;
+    for (auto *swapchain : _gpuQueue->acquiredSwapchains) {
+        auto &signal = swapchain->imageGeneration->renderFinished[swapchain->curImageIndex];
+        if (_gpuQueue->presentSemaphoresSignaled) {
+            // Multiple actual submits in a frame: the previous signal is
+            // consumed by this submit, not by present. Retire it on this
+            // submit's completion point and replace the image-owned semaphore. No extra
+            // submission is introduced solely to signal a present semaphore.
+            device->gpuRecycleBin()->collectSemaphore(signal);
+            VkSemaphoreCreateInfo createInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+            VK_CHECK(vkCreateSemaphore(device->gpuDevice()->vkDevice, &createInfo, nullptr, &signal));
+        }
+        signals.push_back(signal);
+    }
+    _gpuQueue->submitStageMasks.resize(waitSemaphoreCount, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
 
-    VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submitInfo.waitSemaphoreCount = utils::toUint(waitSemaphoreCount);
-    submitInfo.pWaitSemaphores = _gpuQueue->lastSignaledSemaphores.data();
-    submitInfo.pWaitDstStageMask = _gpuQueue->submitStageMasks.data();
-    submitInfo.commandBufferCount = utils::toUint(_gpuQueue->commandBuffers.size());
-    submitInfo.pCommandBuffers = &_gpuQueue->commandBuffers[0];
-    submitInfo.signalSemaphoreCount = waitSemaphoreCount ? 1 : 0;
-    submitInfo.pSignalSemaphores = &signal;
+    VulkanSubmitBatch submitInfo;
+    submitInfo.commands.assign(_gpuQueue->commandBuffers.begin(), _gpuQueue->commandBuffers.end());
+    for (size_t i=0; i<waitSemaphoreCount; ++i) {
+        submitInfo.waits.push_back({_gpuQueue->lastSignaledSemaphores[i], _gpuQueue->submitStageMasks[i]});
+    }
+    for (auto signal : signals) submitInfo.signals.push_back({signal});
 
-    VkFence vkFence = device->gpuFencePool()->alloc();
-    VK_CHECK(vkQueueSubmit(_gpuQueue->vkQueue, 1, &submitInfo, vkFence));
+    VkFence vkFence = _gpuQueue->completionTracker->usesTimeline() ? VK_NULL_HANDLE : device->gpuFencePool()->alloc();
+    GpuCompletionPoint point;
+    const auto result = device->gpuDevice()->submitTracked(_gpuQueue.get(), submitInfo, vkFence, point, recordings);
+    VK_CHECK(result);
+    if (result != VK_SUCCESS) return; // no point, keep pending user recording ownership
+    for (auto *cmdBuff : selected) {
+        cmdBuff->_pendingQueue.pop();
+        cmdBuff->_pendingWSIUsage.pop();
+        cmdBuff->_pendingRecordings.pop();
+    }
 
-    _gpuQueue->lastSignaledSemaphores.assign(1, signal);
+    _gpuQueue->wsiTransitionsQueued = false;
+    _gpuQueue->lastSignaledSemaphores = std::move(signals);
+    _gpuQueue->presentSemaphoresSignaled = !_gpuQueue->acquiredSwapchains.empty();
 }
 
 } // namespace gfx

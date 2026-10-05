@@ -24,106 +24,94 @@
 
 #include "VKPipelineCache.h"
 
-#include <fstream>
-
-#include "base/BinaryArchive.h"
-
 #include "gfx-base/GFXUtil.h"
-
-namespace {
-const char *fileName = "/pipeline_cache_vk.bin";
-const uint32_t MAGIC = 0x4343564B; // "CCVK"
-const uint32_t VERSION = 1;
-
-void loadData(const ccstd::string &path, ccstd::vector<char> &data) {
-    std::ifstream stream(path, std::ios::binary);
-    if (!stream.is_open()) {
-        CC_LOG_INFO("Load program cache, no cached files.");
-        return;
-    }
-
-    uint32_t magic = 0;
-    uint32_t version = 0;
-
-    cc::BinaryInputArchive archive(stream);
-    auto loadResult = archive.load(magic);
-    loadResult &= archive.load(version);
-
-    uint32_t size = 0;
-    if (loadResult && magic == MAGIC && version >= VERSION) {
-        loadResult &= archive.load(size);
-        data.resize(size);
-        loadResult &= archive.load(data.data(), size);
-    }
-    if (loadResult) {
-        CC_LOG_INFO("Load pipeline cache success.");
-    }
-}
-} // namespace
 
 namespace cc::gfx {
 
 CCVKPipelineCache::CCVKPipelineCache() {
-    _savePath = getPipelineCacheFolder() + fileName;
+    _savePath = getPipelineCacheFolder() + "/pipeline_cache_vk.bin";
 }
 
 CCVKPipelineCache::~CCVKPipelineCache() {
     if (_pipelineCache != VK_NULL_HANDLE) {
-#if CC_USE_PIPELINE_CACHE
         saveCache();
-#endif
         vkDestroyPipelineCache(_device, _pipelineCache, nullptr);
     }
 }
 
-void CCVKPipelineCache::init(VkDevice dev) {
+void CCVKPipelineCache::init(VkDevice dev, const VkPhysicalDeviceProperties &properties,
+                             bool persistent, const ccstd::string &path) {
+    CC_ASSERT(_pipelineCache == VK_NULL_HANDLE);
+    if (_pipelineCache != VK_NULL_HANDLE) return;
     _device = dev;
+    _identity = VulkanPipelineCachePersistence::identity(properties);
+    _persistent = persistent;
+    if (!path.empty()) _savePath = path;
+    _lastCheckpoint = std::chrono::steady_clock::now();
     loadCache();
 }
 
 void CCVKPipelineCache::loadCache() {
-    ccstd::vector<char> data;
-#if CC_USE_PIPELINE_CACHE
-    loadData(_savePath, data);
-#endif
-
-    VkPipelineCacheCreateInfo cacheInfo = {};
-    cacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-    cacheInfo.pNext = nullptr;
-    cacheInfo.initialDataSize = static_cast<uint32_t>(data.size());
-    cacheInfo.pInitialData = data.data();
-    VK_CHECK(vkCreatePipelineCache(_device, &cacheInfo, nullptr, &_pipelineCache));
+    if (_pipelineCache != VK_NULL_HANDLE) return;
+    VulkanPipelineCachePersistence::Bytes data;
+    _loadedFromDisk = false;
+    if (_persistent) {
+        try {
+            VulkanPipelineCachePersistence::read(std::filesystem::u8path(_savePath.c_str()), _identity, data);
+        } catch (...) {
+            data.clear(); // optional cache failure must not abort device bootstrap
+        }
+    }
+    VkPipelineCacheCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    info.initialDataSize = data.size();
+    info.pInitialData = data.empty() ? nullptr : data.data();
+    auto result = vkCreatePipelineCache(_device, &info, nullptr, &_pipelineCache);
+    if (result != VK_SUCCESS && !data.empty()) {
+        // Even validated optional data can be rejected by the implementation.
+        // A cold-cache retry does not turn a true device/allocation failure into success.
+        _pipelineCache = VK_NULL_HANDLE;
+        info.initialDataSize = 0;
+        info.pInitialData = nullptr;
+        result = vkCreatePipelineCache(_device, &info, nullptr, &_pipelineCache);
+        CC_LOG_WARNING("Vulkan pipeline cache rejected; retried empty cache.");
+    } else {
+        _loadedFromDisk = result == VK_SUCCESS && !data.empty();
+    }
+    if (result != VK_SUCCESS) _pipelineCache = VK_NULL_HANDLE;
+    VK_CHECK(result);
+    if (_persistent) CC_LOG_INFO("Vulkan pipeline cache: %s", _loadedFromDisk ? "loaded validated data" : "cold cache");
 }
 
 void CCVKPipelineCache::saveCache() {
-    if (!_dirty) {
+    if (!_persistent || !_dirty || !_pipelineCache) return;
+    VulkanPipelineCachePersistence::Bytes data;
+    if (!VulkanPipelineCachePersistence::retrieve(_device, _pipelineCache, vkGetPipelineCacheData, _identity, data)) {
+        CC_LOG_WARNING("Vulkan pipeline cache retrieval failed; previous file preserved.");
         return;
     }
-    std::ofstream stream(_savePath, std::ios::binary);
-    if (!stream.is_open()) {
-        CC_LOG_INFO("Save program cache failed.");
-        return;
+    try {
+        if (VulkanPipelineCachePersistence::write(std::filesystem::u8path(_savePath.c_str()), _identity, data)) {
+            _dirty = false;
+        } else {
+            CC_LOG_WARNING("Vulkan pipeline cache save failed; previous file preserved.");
+        }
+    } catch (...) {
+        CC_LOG_WARNING("Vulkan pipeline cache path failed; previous file preserved.");
     }
-    BinaryOutputArchive archive(stream);
-    archive.save(MAGIC);
-    archive.save(VERSION);
-
-    size_t size = 0;
-    vkGetPipelineCacheData(_device, _pipelineCache, &size, nullptr);
-    ccstd::vector<char> data(size);
-    vkGetPipelineCacheData(_device, _pipelineCache, &size, data.data());
-
-    archive.save(static_cast<uint32_t>(size));
-    archive.save(data.data(), static_cast<uint32_t>(size));
-    _dirty = false;
 }
 
-void CCVKPipelineCache::setDirty() {
-    _dirty = true;
+void CCVKPipelineCache::checkpoint() {
+    if (!_persistent || !_dirty) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - _lastCheckpoint < std::chrono::seconds(30)) return;
+    // The rendering thread owns checkpoint/create operations. This is a serial
+    // checkpoint, not an asynchronous or concurrently mutable cache API.
+    _lastCheckpoint = now;
+    saveCache();
 }
 
-VkPipelineCache CCVKPipelineCache::getHandle() const {
-    return _pipelineCache;
-}
+void CCVKPipelineCache::setDirty() { _dirty = true; }
+VkPipelineCache CCVKPipelineCache::getHandle() const { return _pipelineCache; }
 
 } // namespace cc::gfx

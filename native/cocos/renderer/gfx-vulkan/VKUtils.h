@@ -70,6 +70,13 @@ VkShaderStageFlags mapVkShaderStageFlags(ShaderStageFlagBit stages);
 SurfaceTransform mapSurfaceTransform(VkSurfaceTransformFlagBitsKHR transform);
 ccstd::string mapVendorName(uint32_t vendorID);
 
+// Caller supplies the device whose feature enablement and independent barrier
+// encoder policy were established at bootstrap.
+void cmdPipelineBarrier(const CCVKGPUDevice *device, VkCommandBuffer commandBuffer,
+                        VkPipelineStageFlags srcStages, VkPipelineStageFlags dstStages, VkDependencyFlags flags,
+                        uint32_t memoryCount, const VkMemoryBarrier *memory,
+                        uint32_t bufferCount, const VkBufferMemoryBarrier *buffers,
+                        uint32_t imageCount, const VkImageMemoryBarrier *images);
 void fullPipelineBarrier(VkCommandBuffer cmdBuff);
 const ThsvsAccessType *getAccessType(AccessFlagBit flag);
 ThsvsImageLayout getAccessLayout(AccessFlags flag);

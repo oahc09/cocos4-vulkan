@@ -26,11 +26,12 @@ Permission is hereby granted, free of charge, to any person obtaining a copy
 namespace cc {
 namespace gfx {
 void CCVKGPURecycleBin::collect(const cc::gfx::CCVKGPUTexture *texture) {
-    auto collectHandleFn = [this](VkImage image, VmaAllocation allocation) {
+    auto collectHandleFn = [this, texture](VkImage image, VmaAllocation allocation) {
         Resource &res = emplaceBack();
         res.type = RecycledType::TEXTURE;
         res.image.vkImage = image;
         res.image.vmaAllocation = allocation;
+        res.swapchainGeneration = texture->swapchainGeneration;
     };
     collectHandleFn(texture->vkImage, texture->vmaAllocation);
 
@@ -42,10 +43,11 @@ void CCVKGPURecycleBin::collect(const cc::gfx::CCVKGPUTexture *texture) {
 }
 
 void CCVKGPURecycleBin::collect(const cc::gfx::CCVKGPUTextureView *textureView) {
-    auto collectHandleFn = [this](VkImageView view) {
+    auto collectHandleFn = [this, textureView](VkImageView view) {
         Resource &res = emplaceBack();
         res.type = RecycledType::TEXTURE_VIEW;
         res.vkImageView = view;
+        res.swapchainGeneration = textureView->gpuTexture->swapchainGeneration;
     };
     collectHandleFn(textureView->vkImageView);
     for (const auto &swapChainView : textureView->swapchainVkImageViews) {
@@ -54,20 +56,15 @@ void CCVKGPURecycleBin::collect(const cc::gfx::CCVKGPUTextureView *textureView) 
 }
 
 void CCVKGPURecycleBin::collect(const CCVKGPUFramebuffer *frameBuffer) {
-    auto collectHandleFn = [this](VkFramebuffer fbo) {
+    auto collectHandleFn = [this, frameBuffer](VkFramebuffer fbo) {
         Resource &res = emplaceBack();
         res.type = RecycledType::FRAMEBUFFER;
         res.vkFramebuffer = fbo;
+        res.swapchainGeneration = frameBuffer->imageGeneration;
     };
     collectHandleFn(frameBuffer->vkFramebuffer);
     for (const auto &fbo : frameBuffer->vkFrameBuffers) {
         collectHandleFn(fbo);
-    }
-}
-
-void CCVKGPURecycleBin::collect(const CCVKGPUDescriptorSet *set) {
-    for (const auto &instance : set->instances) {
-        collect(set->layoutID, instance.vkDescriptorSet);
     }
 }
 
@@ -104,13 +101,15 @@ void CCVKGPURecycleBin::clear() {
                 }
                 break;
             case RecycledType::TEXTURE_VIEW:
-                if (res.vkImageView != VK_NULL_HANDLE) {
+                if (res.vkImageView != VK_NULL_HANDLE &&
+                    (!res.swapchainGeneration || res.swapchainGeneration->imageViews.erase(res.vkImageView))) {
                     vkDestroyImageView(_device->vkDevice, res.vkImageView, nullptr);
                     res.vkImageView = VK_NULL_HANDLE;
                 }
                 break;
             case RecycledType::FRAMEBUFFER:
-                if (res.vkFramebuffer != VK_NULL_HANDLE) {
+                if (res.vkFramebuffer != VK_NULL_HANDLE &&
+                    (!res.swapchainGeneration || res.swapchainGeneration->framebuffers.erase(res.vkFramebuffer))) {
                     vkDestroyFramebuffer(_device->vkDevice, res.vkFramebuffer, nullptr);
                     res.vkFramebuffer = VK_NULL_HANDLE;
                 }
@@ -133,16 +132,27 @@ void CCVKGPURecycleBin::clear() {
             case RecycledType::PIPELINE_STATE:
                 if (res.vkPipeline != VK_NULL_HANDLE) {
                     vkDestroyPipeline(_device->vkDevice, res.vkPipeline, nullptr);
+                    res.vkPipeline = VK_NULL_HANDLE;
                 }
+                // paired optional Dynamic variant: owned non-NULL destroyed once
+                if (res.vkDynamicPipeline != VK_NULL_HANDLE) {
+                    vkDestroyPipeline(_device->vkDevice, res.vkDynamicPipeline, nullptr);
+                    res.vkDynamicPipeline = VK_NULL_HANDLE;
+                }
+
                 break;
             case RecycledType::DESCRIPTOR_SET:
                 if (res.set.vkSet != VK_NULL_HANDLE) {
                     CCVKDevice::getInstance()->gpuDevice()->getDescriptorSetPool(res.set.layoutId)->yield(res.set.vkSet);
                 }
                 break;
+            case RecycledType::SEMAPHORE:
+                if (res.vkSemaphore != VK_NULL_HANDLE) vkDestroySemaphore(_device->vkDevice, res.vkSemaphore, nullptr);
+                break;
             default: break;
         }
         res.type = RecycledType::UNKNOWN;
+        res.swapchainGeneration.reset();
     }
     _count = 0;
 }

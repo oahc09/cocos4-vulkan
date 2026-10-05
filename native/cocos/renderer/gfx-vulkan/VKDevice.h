@@ -37,6 +37,8 @@ class CCVKTexture;
 
 class CCVKGPUDevice;
 class CCVKGPUContext;
+struct CCVKGPUSwapchain;
+struct CCVKGPUQueue;
 
 class CCVKGPUBufferHub;
 class CCVKGPUTransportHub;
@@ -50,6 +52,13 @@ class CCVKPipelineCache;
 class CCVKGPUFencePool;
 class CCVKGPURecycleBin;
 class CCVKGPUStagingBufferPool;
+
+// Read-only allocation counts. WSI generations and external/test objects are
+// separate owners; these are submission pools, transport and completion objects.
+struct VulkanCompletionObjectCounts {
+    uint32_t fences = 0;
+    uint32_t semaphores = 0;
+};
 
 class CC_VULKAN_API CCVKDevice final : public Device {
 public:
@@ -89,20 +98,28 @@ public:
 
     inline CCVKGPUDevice *gpuDevice() const { return _gpuDevice.get(); }
     inline CCVKGPUContext *gpuContext() { return _gpuContext.get(); }
+    inline uint32_t getLastValidationErrorCount() const { return _lastValidationErrorCount; }
+    inline bool autoBarrierEnabled() const { return _options.enableBarrierDeduce; }
 
     inline CCVKGPUBufferHub *gpuBufferHub() const { return _gpuBufferHub.get(); }
     inline CCVKGPUTransportHub *gpuTransportHub() const { return _gpuTransportHub.get(); }
     inline CCVKGPUDescriptorHub *gpuDescriptorHub() const { return _gpuDescriptorHub.get(); }
-    inline CCVKGPUSemaphorePool *gpuSemaphorePool() const { return _gpuSemaphorePool.get(); }
+    CCVKGPUSemaphorePool *gpuSemaphorePool() const;
     inline CCVKGPUBarrierManager *gpuBarrierManager() const { return _gpuBarrierManager.get(); }
     inline CCVKGPUDescriptorSetHub *gpuDescriptorSetHub() const { return _gpuDescriptorSetHub.get(); }
     inline CCVKGPUInputAssemblerHub *gpuIAHub() const { return _gpuIAHub.get(); }
     inline CCVKPipelineCache *pipelineCache() const { return _pipelineCache.get(); }
+    // Explicit internal opt-in for serial prewarm experiments. Call on the
+    // creation/render thread before starting the manifest; never during a create.
+    bool configurePipelineCacheForPrewarm(const ccstd::string &path);
 
     CCVKGPUFencePool *gpuFencePool();
     CCVKGPURecycleBin *gpuRecycleBin();
     CCVKGPUStagingBufferPool *gpuStagingBufferPool();
+    VulkanCompletionObjectCounts completionObjectCounts() const;
     void waitAllFences();
+    void abortAcquiredSwapchain(CCVKGPUSwapchain *swapchain);
+    void prepareWSISubmit(CCVKGPUQueue *queue);
 
     void updateBackBufferCount(uint32_t backBufferCount);
     SampleCount getMaxSampleCount(Format format, TextureUsage usage, TextureFlags flags) const override;
@@ -153,7 +170,7 @@ protected:
     std::unique_ptr<CCVKGPUBufferHub> _gpuBufferHub;
     std::unique_ptr<CCVKGPUTransportHub> _gpuTransportHub;
     std::unique_ptr<CCVKGPUDescriptorHub> _gpuDescriptorHub;
-    std::unique_ptr<CCVKGPUSemaphorePool> _gpuSemaphorePool;
+    ccstd::vector<std::unique_ptr<CCVKGPUSemaphorePool>> _gpuSemaphorePools;
     std::unique_ptr<CCVKGPUBarrierManager> _gpuBarrierManager;
     std::unique_ptr<CCVKGPUDescriptorSetHub> _gpuDescriptorSetHub;
     std::unique_ptr<CCVKGPUInputAssemblerHub> _gpuIAHub;
@@ -163,6 +180,7 @@ protected:
     ccstd::vector<const char *> _extensions;
 
     IXRInterface *_xr{nullptr};
+    uint32_t _lastValidationErrorCount{0};
 };
 
 } // namespace gfx

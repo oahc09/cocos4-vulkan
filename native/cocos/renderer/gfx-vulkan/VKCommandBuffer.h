@@ -28,6 +28,8 @@
 #include "gfx-base/GFXCommandBuffer.h"
 
 #include "VKGPUObjects.h"
+#include "VKRenderingInfoContract.h"
+#include "VKRenderingTransitionContract.h"
 
 namespace cc {
 namespace gfx {
@@ -79,8 +81,14 @@ protected:
     void doInit(const CommandBufferInfo &info) override;
     void doDestroy() override;
 
+    void refreshDescriptorSetVersions();
     void bindDescriptorSets(VkPipelineBindPoint bindPoint);
     void selfDependency();
+    void recordSwapchainUsage(const CCVKGPUSwapchain *swapchain);
+    bool pendingWSIUsageValid() const;
+    bool pendingRecordingValid() const;
+    bool beginDynamicRenderPass(const VkRect2D &area, const VkClearValue &clear, const VkClearValue *depthStencilClear, uint32_t secondaryCBCount);
+    bool bindCurrentGraphicsPipeline();
 
     IntrusivePtr<CCVKGPUCommandBuffer> _gpuCommandBuffer;
 
@@ -96,6 +104,15 @@ protected:
     IntrusivePtr<CCVKGPURenderPass> _curGPURenderPass;
 
     bool _secondaryRP = false;
+    bool _dynamicRenderPass = false;
+    VkPipeline _boundGraphicsPipeline = VK_NULL_HANDLE;
+    VKRenderingInfoContract _dynamicRenderingInfo;
+    VKRenderingTransitionContract _dynamicTransition;
+    VKRenderingTransitionContract _dynamicResolveTransition;
+    VKRenderingTransitionContract _dynamicDepthStencilTransition;
+    VKRenderingTransitionContract _dynamicDepthStencilResolveTransition;
+    bool _skipRenderPass = false;
+    bool _skipSecondaryExecution = false;
     bool _hasSubPassSelfDependency = false;
     uint32_t _currentSubPass = 0;
 
@@ -104,10 +121,13 @@ protected:
     // temp storage
     ccstd::vector<VkImageBlit> _blitRegions;
     ccstd::vector<VkCommandBuffer> _vkCommandBuffers;
-    ccstd::queue<VkEvent> _availableEvents;
-    ccstd::unordered_map<const GFXObject *, VkEvent> _barrierEvents;
+    ccstd::queue<IntrusivePtr<CCVKGPUEvent>> _availableEvents;
+    ccstd::unordered_map<const GFXObject *, IntrusivePtr<CCVKGPUEvent>> _barrierEvents;
 
     ccstd::queue<VkCommandBuffer> _pendingQueue;
+    ccstd::queue<std::shared_ptr<CCVKGPURecording>> _pendingRecordings;
+    ccstd::vector<CCVKGPUWSIUsage> _recordedWSIUsage;
+    ccstd::queue<ccstd::vector<CCVKGPUWSIUsage>> _pendingWSIUsage;
     VkDebugMarkerMarkerInfoEXT _markerInfo = {VK_STRUCTURE_TYPE_DEBUG_MARKER_MARKER_INFO_EXT, nullptr};
     VkDebugUtilsLabelEXT _utilLabelInfo = {VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr};
 };

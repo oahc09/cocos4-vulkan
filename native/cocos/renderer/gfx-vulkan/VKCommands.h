@@ -59,6 +59,12 @@ void cmdFuncCCVKDestroyDescriptorSetLayout(CCVKGPUDevice *device, CCVKGPUDescrip
 void cmdFuncCCVKDestroyPipelineLayout(CCVKGPUDevice *device, CCVKGPUPipelineLayout *gpuPipelineLayout);
 void cmdFuncCCVKDestroyPipelineState(CCVKGPUDevice *device, CCVKGPUPipelineState *gpuPipelineState);
 
+// M6-A2a: narrow RP eligibility for an optional Dynamic pipeline variant.
+// Checks the real SubpassInfo/attachments/sample counts/metadata/barrier ops
+// (NOT the FBO/actual textures/offscreen/secondary state). Shared so a later
+// command-buffer gate can reuse the exact same predicate.
+bool vkIsDynamicRenderPassCandidate(const CCVKGPURenderPass *gpuRenderPass);
+
 void cmdFuncCCVKImageMemoryBarrier(const CCVKGPUCommandBuffer *gpuCommandBuffer, const ThsvsImageBarrier &imageBarrier);
 
 } // namespace gfx

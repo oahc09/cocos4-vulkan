@@ -44,7 +44,8 @@ public:
 
     inline CCVKGPUSwapchain *gpuSwapchain() { return _gpuSwapchain; }
 
-    bool checkSwapchainStatus(uint32_t width = 0, uint32_t height = 0);
+    // UINT32_MAX means query/retain extent; explicit zero means suspended.
+    bool checkSwapchainStatus(uint32_t width = UINT32_MAX, uint32_t height = UINT32_MAX);
 
 protected:
     void doInit(const SwapchainInfo &info) override;
@@ -53,6 +54,7 @@ protected:
     void doDestroySurface() override;
     void doCreateSurface(void *windowHandle) override;
 
+    Format selectSurfaceConfig();
     void createVkSurface();
     void destroySwapchain(CCVKGPUDevice *gpuDevice);
 

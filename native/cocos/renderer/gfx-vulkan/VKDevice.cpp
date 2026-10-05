@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "VKDevice.h"
+#include <cstdlib>
 #include "VKBuffer.h"
 #include "VKCommandBuffer.h"
 #include "VKCommands.h"
@@ -76,10 +77,160 @@ static VkResult VKAPI_PTR vkCreateRenderPass2KHRFallback(
     const VkAllocationCallbacks *pAllocator,
     VkRenderPass *pRenderPass);
 
+std::shared_ptr<GpuCompletionTracker> CCVKGPUDevice::getCompletionTracker(VkQueue queue) {
+    auto &tracker = completionTrackers[queue];
+    if (!tracker) {
+        tracker = std::make_shared<GpuCompletionTracker>(vkDevice, queue,
+            GpuCompletionTracker::Functions{&vkQueueSubmit, &vkGetFenceStatus, &vkWaitForFences,
+                                           &vkGetSemaphoreCounterValue, &vkWaitSemaphores,
+                                           apiVersionInfo.effectiveDeviceApiVersion >= VK_API_VERSION_1_3 ? &vkQueueSubmit2 : &vkQueueSubmit2KHR});
+        if (runtimePaths.useSubmit2 && tracker->configureSubmit2() != VK_SUCCESS) {
+            tracker.reset(); return nullptr;
+        }
+        if (runtimePaths.useTimelineSemaphore) {
+            auto &semaphore = completionSemaphores[queue];
+            VkSemaphoreTypeCreateInfo typeInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+            typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+            VkSemaphoreCreateInfo createInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+            createInfo.pNext = &typeInfo;
+            VkResult result = vkCreateSemaphore(vkDevice, &createInfo, nullptr, &semaphore);
+            if (result == VK_SUCCESS) result = tracker->configureTimeline(semaphore, maxTimelineSemaphoreValueDifference);
+            if (result != VK_SUCCESS) {
+                CC_LOG_ERROR("Vulkan completion tracker initialization failed: result=%d", result);
+                if (semaphore) vkDestroySemaphore(vkDevice, semaphore, nullptr);
+                completionSemaphores.erase(queue);
+                tracker.reset();
+                return nullptr;
+            }
+        }
+    }
+    return tracker;
+}
+
+VkResult CCVKGPUDevice::submitTracked(CCVKGPUQueue *queue, const VulkanSubmitBatch &info, VkFence fence, GpuCompletionPoint &point,
+                                     const std::vector<std::shared_ptr<CCVKGPURecording>> &recordings) {
+    point = {};
+    for (const auto &recording : recordings) {
+        if (!recording || !recording->valid()) return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    std::shared_ptr<CCVKGPURecordingSubmission> submission;
+    if (!recordings.empty()) {
+        // All ownership and pool bookkeeping allocation precedes the driver call.
+        submission = std::make_shared<CCVKGPURecordingSubmission>();
+        submission->tracker = queue->completionTracker;
+        submission->recordings = recordings;
+        recordingSubmissions.push_back(submission);
+        for (const auto &recording : recordings) recording->trackSubmission(submission);
+    }
+    // All bookkeeping storage precedes the actual driver submission. A
+    // delayed/secondary recording can read instances belonging to other slots.
+    std::vector<uint32_t> slots{curBackBufferIndex};
+    for (const auto &recording : recordings) recording->appendBufferSlots(slots);
+    if (slotCompletions.size() < backBufferCount) slotCompletions.resize(backBufferCount);
+    for (auto slot : slots) {
+        if (slot >= backBufferCount) {
+            if (submission) recordingSubmissions.pop_back();
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+    const auto domain = queue->completionTracker->domain();
+    for (auto slot : slots) {
+        auto &points = slotCompletions[slot];
+        if (std::none_of(points.begin(), points.end(), [&](GpuCompletionPoint candidate) { return candidate.domain == domain; })) {
+            points.push_back({domain, 0});
+        }
+    }
+    const VkResult result = queue->completionTracker->submit(info, fence, point);
+    for (auto slot : slots) {
+        auto &points = slotCompletions[slot];
+        auto existing = std::find_if(points.begin(), points.end(), [&](GpuCompletionPoint candidate) { return candidate.domain == domain; });
+        if (result == VK_SUCCESS) *existing = point;
+        else if (!existing->value) points.erase(existing);
+    }
+    if (result == VK_SUCCESS) {
+        if (submission) submission->point = point;
+        queue->lastCompletion = point;
+        ++trackedSubmitCount;
+        if (fence) ++submissionFenceCount;
+    } else if (submission) {
+        recordingSubmissions.pop_back();
+    }
+    return result;
+}
+
+void CCVKGPUDevice::retireRecordings() {
+    for (auto it = recordingSubmissions.begin(); it != recordingSubmissions.end();) {
+        const auto &submission = *it;
+        if (!submission->point.empty() && submission->tracker->isComplete(submission->point)) {
+            it = recordingSubmissions.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+VkResult CCVKGPUDevice::observeCompletedFences(const VkFence *fences, uint32_t count) {
+    for (auto &entry : completionTrackers) {
+        for (uint32_t i = 0; i < count; ++i) {
+            const VkResult result = entry.second->observeFenceCompletion(fences[i]);
+            if (result != VK_SUCCESS) return result;
+        }
+    }
+    return VK_SUCCESS;
+}
+
+bool CCVKGPUDevice::slotComplete(uint32_t slot) {
+    if (slot >= slotCompletions.size()) return true;
+    for (auto point : slotCompletions[slot]) {
+        const auto found = std::find_if(completionTrackers.begin(), completionTrackers.end(), [&](const auto &entry) {
+            return entry.second->domain() == point.domain;
+        });
+        if (found == completionTrackers.end() || !found->second->isComplete(point)) return false;
+    }
+    return true;
+}
+
+VkResult CCVKGPUDevice::waitSlot(uint32_t slot, uint64_t timeout) {
+    if (slot >= slotCompletions.size()) return VK_SUCCESS;
+    for (const auto point : slotCompletions[slot]) {
+        const auto found = std::find_if(completionTrackers.begin(), completionTrackers.end(), [&](const auto &entry) {
+            return entry.second && entry.second->domain() == point.domain;
+        });
+        if (found == completionTrackers.end()) return VK_ERROR_INITIALIZATION_FAILED;
+        const auto result = found->second->wait(point, timeout);
+        if (result != VK_SUCCESS) return result;
+    }
+    return VK_SUCCESS;
+}
+
+void CCVKGPUDevice::shutdownCompletionTrackers() {
+    recordingSubmissions.clear(); // caller already made the device idle
+    for (auto &entry : completionTrackers) if (entry.second) entry.second->shutdown();
+    for (const auto &entry : completionSemaphores) if (entry.second) vkDestroySemaphore(vkDevice, entry.second, nullptr);
+    completionSemaphores.clear();
+    completionTrackers.clear();
+    slotCompletions.clear();
+}
+
 CCVKDevice *CCVKDevice::instance = nullptr;
 
 CCVKDevice *CCVKDevice::getInstance() {
     return CCVKDevice::instance;
+}
+
+bool CCVKDevice::configurePipelineCacheForPrewarm(const ccstd::string &path) {
+    // Serial internal opt-in, before any factory has populated this cache.
+    // A dirty existing cache is deliberately retained rather than replaced.
+    if (path.empty() || !_gpuDevice || !_gpuContext || !_pipelineCache || _pipelineCache->isDirty()) return false;
+    try {
+        auto candidate = std::make_unique<CCVKPipelineCache>();
+        candidate->init(_gpuDevice->vkDevice, _gpuContext->physicalDeviceProperties, true, path);
+        if (!candidate->getHandle()) return false;
+        _pipelineCache = std::move(candidate);
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 CCVKDevice::CCVKDevice() {
@@ -98,6 +249,7 @@ CCVKDevice::~CCVKDevice() {
 }
 
 bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
+    _lastValidationErrorCount = 0;
     _xr = CC_GET_XR_INTERFACE();
     if (_xr) {
         _xr->preGFXDeviceInitialize(_api);
@@ -107,57 +259,53 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
         return false;
     }
 
-    const VkPhysicalDeviceFeatures2 &deviceFeatures2 = _gpuContext->physicalDeviceFeatures2;
-    const VkPhysicalDeviceFeatures &deviceFeatures = deviceFeatures2.features;
-    // const VkPhysicalDeviceVulkan11Features &deviceVulkan11Features = _gpuContext->physicalDeviceVulkan11Features;
-    // const VkPhysicalDeviceVulkan12Features &deviceVulkan12Features = _gpuContext->physicalDeviceVulkan12Features;
+    const VkPhysicalDeviceFeatures &deviceFeatures = _gpuContext->physicalDeviceFeatures;
 
     ///////////////////// Device Creation /////////////////////
 
     _gpuDevice = std::make_unique<CCVKGPUDevice>();
+    _gpuDevice->apiVersionInfo = _gpuContext->apiVersionInfo;
     _gpuDevice->minorVersion = _gpuContext->minorVersion;
+    _gpuDevice->capabilities = _gpuContext->capabilities;
+    auto &vkCaps = _gpuDevice->capabilities;
+    auto failBootstrap = [this]() {
+        if (_gpuDevice->vkDevice != VK_NULL_HANDLE) {
+            _gpuDevice->shutdownCompletionTrackers(); // bootstrap has not submitted work
+            vkDestroyDevice(_gpuDevice->vkDevice, nullptr);
+        }
+        _gpuDevice.reset();
+        _gpuContext->destroy();
+        _lastValidationErrorCount = _gpuContext->validationErrorCount.load(std::memory_order_relaxed);
+        _gpuContext.reset();
+        return false;
+    };
+
+    // Request useful tier features, while their renderer paths stay on the
+    // existing encoders until the matching migration milestone is validated.
+    requestFeature(vkCaps.timelineSemaphore, _gpuDevice->minorVersion >= 2);
+    requestFeature(vkCaps.separateDepthStencilLayouts, _gpuDevice->minorVersion >= 2);
+    requestFeature(vkCaps.synchronization2, _gpuDevice->minorVersion >= 3);
+    requestFeature(vkCaps.dynamicRendering, _gpuDevice->minorVersion >= 3);
+    requestFeature(vkCaps.maintenance4, _gpuDevice->minorVersion >= 3);
 
     // only enable the absolute essentials
     ccstd::vector<const char *> requestedLayers{};
     ccstd::vector<const char *> requestedExtensions{
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     };
-    requestedExtensions.push_back(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
 #if CC_DEBUG
     requestedExtensions.push_back(VK_EXT_DEBUG_MARKER_EXTENSION_NAME);
 #endif
     if (_gpuDevice->minorVersion < 2) {
         requestedExtensions.push_back(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME);
     }
-    if (_gpuDevice->minorVersion < 1) {
-        requestedExtensions.push_back(VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME);
-        requestedExtensions.push_back(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
-        requestedExtensions.push_back(VK_KHR_DESCRIPTOR_UPDATE_TEMPLATE_EXTENSION_NAME);
-    }
-
-    VkPhysicalDeviceFeatures2 requestedFeatures2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-    VkPhysicalDeviceVulkan11Features requestedVulkan11Features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
-    VkPhysicalDeviceVulkan12Features requestedVulkan12Features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-    // features should be enabled like this:
-    requestedFeatures2.features.textureCompressionASTC_LDR = deviceFeatures.textureCompressionASTC_LDR;
-    requestedFeatures2.features.textureCompressionBC = deviceFeatures.textureCompressionBC;
-    requestedFeatures2.features.textureCompressionETC2 = deviceFeatures.textureCompressionETC2;
-    requestedFeatures2.features.samplerAnisotropy = deviceFeatures.samplerAnisotropy;
-    requestedFeatures2.features.depthBounds = deviceFeatures.depthBounds;
-    requestedFeatures2.features.multiDrawIndirect = deviceFeatures.multiDrawIndirect;
-    // requestedFeatures2.features.se
-    requestedVulkan12Features.separateDepthStencilLayouts = _gpuContext->physicalDeviceVulkan12Features.separateDepthStencilLayouts;
-
-    VkPhysicalDeviceFragmentShadingRateFeaturesKHR shadingRateRequest = {};
-    shadingRateRequest.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR;
-    shadingRateRequest.attachmentFragmentShadingRate = _gpuContext->physicalDeviceFragmentShadingRateFeatures.attachmentFragmentShadingRate;
-    shadingRateRequest.pipelineFragmentShadingRate = _gpuContext->physicalDeviceFragmentShadingRateFeatures.pipelineFragmentShadingRate;
-
-    requestedVulkan12Features.pNext = &shadingRateRequest;
-
-    if (_gpuContext->validationEnabled) {
-        requestedLayers.push_back("VK_LAYER_KHRONOS_validation");
-    }
+    VkPhysicalDeviceFeatures requestedFeatures{};
+    requestedFeatures.textureCompressionASTC_LDR = deviceFeatures.textureCompressionASTC_LDR;
+    requestedFeatures.textureCompressionBC = deviceFeatures.textureCompressionBC;
+    requestedFeatures.textureCompressionETC2 = deviceFeatures.textureCompressionETC2;
+    requestedFeatures.samplerAnisotropy = deviceFeatures.samplerAnisotropy;
+    requestedFeatures.depthBounds = deviceFeatures.depthBounds;
+    requestedFeatures.multiDrawIndirect = deviceFeatures.multiDrawIndirect;
 
     // check extensions
     uint32_t availableLayerCount;
@@ -169,6 +317,37 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
     VK_CHECK(vkEnumerateDeviceExtensionProperties(_gpuContext->physicalDevice, nullptr, &availableExtensionCount, nullptr));
     _gpuDevice->extensions.resize(availableExtensionCount);
     VK_CHECK(vkEnumerateDeviceExtensionProperties(_gpuContext->physicalDevice, nullptr, &availableExtensionCount, _gpuDevice->extensions.data()));
+
+    if (!isExtensionSupported(VK_KHR_SWAPCHAIN_EXTENSION_NAME, _gpuDevice->extensions)) {
+        CC_LOG_ERROR("Vulkan device is missing required VK_KHR_swapchain.");
+        return failBootstrap();
+    }
+    VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maintenanceQuery{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT};
+    const bool hasMaintenance = isExtensionSupported(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME, _gpuDevice->extensions);
+    if (hasMaintenance) {
+        VkPhysicalDeviceFeatures2 query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        query.pNext = &maintenanceQuery;
+        vkGetPhysicalDeviceFeatures2(_gpuContext->physicalDevice, &query);
+    }
+    vkCaps.swapchainMaintenance1.supported = maintenanceQuery.swapchainMaintenance1 == VK_TRUE;
+    const bool maintenanceClosure = _gpuContext->checkExtension(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME) &&
+                                    _gpuContext->checkExtension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+    requestFeature(vkCaps.swapchainMaintenance1, hasMaintenance && maintenanceClosure && vkCaps.swapchainMaintenance1.supported && !_xr);
+    if (vkCaps.swapchainMaintenance1.requested) requestedExtensions.push_back(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
+    // FSR requires renderpass2, provided by core 1.2 or the enabled KHR path.
+    const bool shadingRateAllowed = _gpuDevice->minorVersion >= 2 ||
+                                    isExtensionSupported(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME, _gpuDevice->extensions);
+    if (shadingRateAllowed && isExtensionSupported(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME, _gpuDevice->extensions)) {
+        requestedExtensions.push_back(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
+        requestFeature(vkCaps.fragmentShadingRateDetail.pipelineFragmentShadingRate, true);
+        requestFeature(vkCaps.fragmentShadingRateDetail.attachmentFragmentShadingRate, true);
+        requestFeature(vkCaps.fragmentShadingRate, true);
+    }
+    // Portability subset is mandatory when advertised and is a device extension.
+    constexpr const char *PORTABILITY_SUBSET = "VK_KHR_portability_subset";
+    if (isExtensionSupported(PORTABILITY_SUBSET, _gpuDevice->extensions)) {
+        requestedExtensions.push_back(PORTABILITY_SUBSET);
+    }
 
 #if CC_SWAPPY_ENABLED
     uint32_t swappyRequiredExtensionCount = 0;
@@ -197,8 +376,36 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
     }
     for (const char *extension : requestedExtensions) {
         if (isExtensionSupported(extension, _gpuDevice->extensions)) {
-            _extensions.push_back(extension);
+            if (!checkExtension(extension)) _extensions.push_back(extension);
         }
+    }
+#if CC_DEBUG
+    // Test policy only: disable feature enablement without changing supported
+    // bits or the API tier. Renderer path switches are independent of this.
+    if (const char *disabled = std::getenv("CC_VULKAN_DISABLE_FEATURES")) {
+        const ccstd::string names(disabled);
+        for (size_t start = 0; start < names.size();) {
+            const size_t end = names.find(',', start);
+            const auto name = names.substr(start, end == ccstd::string::npos ? end : end - start);
+            if (name == "timelineSemaphore") vkCaps.timelineSemaphore.requested = false;
+            else if (name == "synchronization2") vkCaps.synchronization2.requested = false;
+            else if (name == "dynamicRendering") vkCaps.dynamicRendering.requested = false;
+            else if (name == "maintenance4") vkCaps.maintenance4.requested = false;
+            else if (name == "swapchainMaintenance1") vkCaps.swapchainMaintenance1.requested = false;
+            else {
+                CC_LOG_ERROR("Unknown CC_VULKAN_DISABLE_FEATURES entry: %s", name.c_str());
+                return failBootstrap();
+            }
+            if (end == ccstd::string::npos) break;
+            start = end + 1;
+        }
+    }
+#endif
+    VulkanFeatureChain enableFeatures;
+    const auto actuallyEnabled = getVulkanFeatureExtensionFlags([this](const char *name) { return checkExtension(name); });
+    if (!enableFeatures.buildEnable(_gpuContext->featureQuery, vkCaps, requestedFeatures, actuallyEnabled)) {
+        CC_LOG_ERROR("Vulkan feature enable chain could not be built.");
+        return failBootstrap();
     }
 
     // prepare the device queues
@@ -226,22 +433,180 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
     deviceCreateInfo.ppEnabledLayerNames = _layers.data();
     deviceCreateInfo.enabledExtensionCount = utils::toUint(_extensions.size());
     deviceCreateInfo.ppEnabledExtensionNames = _extensions.data();
-    if (_gpuDevice->minorVersion < 1 && !_gpuContext->checkExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
-        deviceCreateInfo.pEnabledFeatures = &requestedFeatures2.features;
-    } else {
-        deviceCreateInfo.pNext = &requestedFeatures2;
-        if (_gpuDevice->minorVersion >= 2) {
-            requestedFeatures2.pNext = &requestedVulkan11Features;
-            requestedVulkan11Features.pNext = &requestedVulkan12Features;
-        }
+    deviceCreateInfo.pNext = enableFeatures.head();
+    VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maintenanceEnable{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT};
+    if (vkCaps.swapchainMaintenance1.requested && checkExtension(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME)) {
+        maintenanceEnable.swapchainMaintenance1 = VK_TRUE;
+        maintenanceEnable.pNext = const_cast<void *>(deviceCreateInfo.pNext);
+        deviceCreateInfo.pNext = &maintenanceEnable;
     }
 
+    VkResult deviceResult = VK_SUCCESS;
     if (_xr) {
         _gpuDevice->vkDevice = _xr->createXRVulkanDevice(&deviceCreateInfo);
     } else {
-        VK_CHECK(vkCreateDevice(_gpuContext->physicalDevice, &deviceCreateInfo, nullptr, &_gpuDevice->vkDevice));
+        deviceResult = vkCreateDevice(_gpuContext->physicalDevice, &deviceCreateInfo, nullptr, &_gpuDevice->vkDevice);
     }
+    const bool created = deviceResult == VK_SUCCESS && _gpuDevice->vkDevice != VK_NULL_HANDLE;
+    enableFeatures.finalizeEnabled(vkCaps, created);
+    finalizeFeature(vkCaps.swapchainMaintenance1, created, maintenanceEnable.swapchainMaintenance1 == VK_TRUE);
+    if (!created) {
+        CC_LOG_ERROR("Vulkan logical device creation failed: result=%d", deviceResult);
+        return failBootstrap();
+    }
+    vkCaps.portabilitySubset = checkExtension(PORTABILITY_SUBSET);
+    _gpuDevice->runtimePaths = normalizeRuntimePaths(vkCaps, VulkanRuntimePaths{});
     volkLoadDevice(_gpuDevice->vkDevice);
+    if (vkCaps.swapchainMaintenance1.enabled && !vkReleaseSwapchainImagesEXT) {
+        CC_LOG_ERROR("Vulkan swapchainMaintenance1 enabled without its image-release entry.");
+        return failBootstrap();
+    }
+    const bool baselineEntries = vkCreateDescriptorUpdateTemplate && vkDestroyDescriptorUpdateTemplate &&
+                                 vkUpdateDescriptorSetWithTemplate && vkGetBufferMemoryRequirements2 &&
+                                 vkGetImageMemoryRequirements2 && vkBindBufferMemory2 && vkBindImageMemory2;
+    const bool timelineEntries = !vkCaps.timelineSemaphore.enabled ||
+                                 (vkGetSemaphoreCounterValue && vkWaitSemaphores && vkSignalSemaphore);
+    const bool sync2Entries = !vkCaps.synchronization2.enabled ||
+                              (_gpuDevice->minorVersion >= 3 ? (vkCmdPipelineBarrier2 && vkQueueSubmit2)
+                                                            : (vkCmdPipelineBarrier2KHR && vkQueueSubmit2KHR));
+    const bool dynamicEntries = !vkCaps.dynamicRendering.enabled || (vkCmdBeginRendering && vkCmdEndRendering);
+    const bool memoryEntries = _gpuDevice->minorVersion < 3 ||
+                               (vkGetDeviceBufferMemoryRequirements && vkGetDeviceImageMemoryRequirements);
+    if (!baselineEntries || !timelineEntries || !sync2Entries || !dynamicEntries || !memoryEntries) {
+        CC_LOG_ERROR("Vulkan device entries missing: baseline=%d timeline=%d sync2=%d dynamic=%d memory=%d",
+                     baselineEntries, timelineEntries, sync2Entries, dynamicEntries, memoryEntries);
+        return failBootstrap();
+    }
+    if (vkCaps.maintenance4.enabled && vkCaps.maxBufferSize == 0) {
+        CC_LOG_ERROR("Vulkan maintenance4 enabled without a valid maxBufferSize limit.");
+        return failBootstrap();
+    }
+
+    // Capability enablement and completion encoder choice are separate policies.
+    bool useTimeline = vkCaps.timelineSemaphore.enabled;
+#if CC_DEBUG
+    if (const char *completionMode = std::getenv("CC_VULKAN_COMPLETION")) {
+        const ccstd::string mode(completionMode);
+        if (mode == "fence") useTimeline = false;
+        else if (mode == "timeline") {
+            if (!vkCaps.timelineSemaphore.enabled) {
+                CC_LOG_ERROR("CC_VULKAN_COMPLETION=timeline requires enabled timelineSemaphore.");
+                return failBootstrap();
+            }
+            useTimeline = true;
+        } else if (mode != "auto" && !mode.empty()) {
+            CC_LOG_ERROR("Invalid CC_VULKAN_COMPLETION: %s", completionMode);
+            return failBootstrap();
+        }
+    }
+#endif
+    VulkanRuntimePaths completionPaths;
+    completionPaths.useTimelineSemaphore = useTimeline;
+#if CC_DEBUG
+    if (const char *submitMode = std::getenv("CC_VULKAN_SUBMIT")) {
+        const ccstd::string mode(submitMode);
+        if (mode == "submit2") {
+            if (!vkCaps.synchronization2.enabled) {
+                CC_LOG_ERROR("CC_VULKAN_SUBMIT=submit2 requires enabled synchronization2.");
+                return failBootstrap();
+            }
+            completionPaths.useSubmit2 = true;
+        } else if (mode != "legacy" && !mode.empty()) {
+            CC_LOG_ERROR("Invalid CC_VULKAN_SUBMIT: %s", submitMode);
+            return failBootstrap();
+        }
+    }
+#endif
+#if CC_DEBUG
+    if (const char *barrierMode = std::getenv("CC_VULKAN_BARRIER")) {
+        const ccstd::string mode(barrierMode);
+        if (mode == "sync2") {
+            if (!vkCaps.synchronization2.enabled) {
+                CC_LOG_ERROR("CC_VULKAN_BARRIER=sync2 requires enabled synchronization2.");
+                return failBootstrap();
+            }
+            completionPaths.useSynchronization2 = true;
+        } else if (mode != "legacy" && !mode.empty()) {
+            CC_LOG_ERROR("Invalid CC_VULKAN_BARRIER: %s", barrierMode);
+            return failBootstrap();
+        }
+    }
+#endif
+#if CC_DEBUG
+    if (const char *renderingMode = std::getenv("CC_VULKAN_RENDERING")) {
+        const ccstd::string mode(renderingMode);
+        if (mode == "dynamic") {
+            if (!vkCaps.dynamicRendering.enabled ||
+                _gpuContext->apiVersionInfo.effectiveDeviceApiVersion < VK_API_VERSION_1_3 ||
+                !vkCmdBeginRendering || !vkCmdEndRendering) {
+                CC_LOG_ERROR("CC_VULKAN_RENDERING=dynamic requires core Vulkan 1.3 and enabled dynamicRendering.");
+                return failBootstrap();
+            }
+            completionPaths.useDynamicRendering = true;
+        } else if (mode == "classic") {
+            completionPaths.forceClassicRenderPass = true;
+        } else if (!mode.empty()) {
+            CC_LOG_ERROR("Invalid CC_VULKAN_RENDERING: %s", renderingMode);
+            return failBootstrap();
+        }
+    }
+#endif
+    _gpuDevice->runtimePaths = normalizeRuntimePaths(vkCaps, completionPaths);
+    if (_gpuDevice->runtimePaths.useTimelineSemaphore) {
+        VkPhysicalDeviceTimelineSemaphoreProperties timelineProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES};
+        VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        properties.pNext = &timelineProperties;
+        vkGetPhysicalDeviceProperties2(_gpuContext->physicalDevice, &properties);
+        _gpuDevice->maxTimelineSemaphoreValueDifference = timelineProperties.maxTimelineSemaphoreValueDifference;
+        if (!_gpuDevice->maxTimelineSemaphoreValueDifference) {
+            CC_LOG_ERROR("Vulkan timeline completion has no valid value-difference limit.");
+            return failBootstrap();
+        }
+    }
+    // All engine queues use index zero of a supported family. Initialize their
+    // trackers before constructing resources, so failure has a clean bootstrap path.
+    for (uint32_t family = 0; family < queueFamilyPropertiesCount; ++family) {
+        VkQueue queue = VK_NULL_HANDLE;
+        vkGetDeviceQueue(_gpuDevice->vkDevice, family, 0, &queue);
+        if (!_gpuDevice->getCompletionTracker(queue)) return failBootstrap();
+    }
+
+    const auto logFeature = [](const char *name, const VulkanCapabilityState &state) {
+        CC_LOG_INFO("Vulkan capability %s: supported=%d requested=%d enabled=%d",
+                    name, state.supported, state.requested, state.enabled);
+    };
+    logFeature("timelineSemaphore", vkCaps.timelineSemaphore);
+    logFeature("bufferDeviceAddress", vkCaps.bufferDeviceAddress);
+    logFeature("separateDepthStencilLayouts", vkCaps.separateDepthStencilLayouts);
+    logFeature("synchronization2", vkCaps.synchronization2);
+    logFeature("dynamicRendering", vkCaps.dynamicRendering);
+    logFeature("maintenance4", vkCaps.maintenance4);
+    logFeature("fragmentShadingRate (any)", vkCaps.fragmentShadingRate);
+    logFeature("pipelineFragmentShadingRate", vkCaps.fragmentShadingRateDetail.pipelineFragmentShadingRate);
+    logFeature("primitiveFragmentShadingRate", vkCaps.fragmentShadingRateDetail.primitiveFragmentShadingRate);
+    logFeature("attachmentFragmentShadingRate", vkCaps.fragmentShadingRateDetail.attachmentFragmentShadingRate);
+    logFeature("memoryBudget", vkCaps.memoryBudget);
+    logFeature("graphicsPipelineLibrary", vkCaps.graphicsPipelineLibrary);
+    logFeature("swapchainMaintenance1", vkCaps.swapchainMaintenance1);
+#define CC_LOG_DESCRIPTOR_CAP(member) logFeature(#member, vkCaps.descriptorIndexing.member)
+    CC_LOG_DESCRIPTOR_CAP(shaderUniformBufferArrayNonUniformIndexing);
+    CC_LOG_DESCRIPTOR_CAP(shaderSampledImageArrayNonUniformIndexing);
+    CC_LOG_DESCRIPTOR_CAP(shaderStorageBufferArrayNonUniformIndexing);
+    CC_LOG_DESCRIPTOR_CAP(shaderStorageImageArrayNonUniformIndexing);
+    CC_LOG_DESCRIPTOR_CAP(descriptorBindingUniformBufferUpdateAfterBind);
+    CC_LOG_DESCRIPTOR_CAP(descriptorBindingSampledImageUpdateAfterBind);
+    CC_LOG_DESCRIPTOR_CAP(descriptorBindingStorageImageUpdateAfterBind);
+    CC_LOG_DESCRIPTOR_CAP(descriptorBindingStorageBufferUpdateAfterBind);
+    CC_LOG_DESCRIPTOR_CAP(descriptorBindingPartiallyBound);
+    CC_LOG_DESCRIPTOR_CAP(descriptorBindingVariableDescriptorCount);
+    CC_LOG_DESCRIPTOR_CAP(runtimeDescriptorArray);
+#undef CC_LOG_DESCRIPTOR_CAP
+    const auto &paths = _gpuDevice->runtimePaths;
+    CC_LOG_INFO("Vulkan limits: maxBufferSize=%llu debugUtils=%d portabilitySubset=%d",
+                static_cast<unsigned long long>(vkCaps.maxBufferSize), vkCaps.debugUtils, vkCaps.portabilitySubset);
+    CC_LOG_INFO("Vulkan paths: timeline=%d sync2=%d submit2=%d dynamicRendering=%d classicOverride=%d maintenance4=%d",
+                paths.useTimelineSemaphore, paths.useSynchronization2, paths.useSubmit2, paths.useDynamicRendering,
+                paths.forceClassicRenderPass, paths.useMaintenance4);
 
     SPIRVUtils::getInstance()->initialize(static_cast<int>(_gpuDevice->minorVersion));
 
@@ -298,7 +663,7 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
     }
 
     _gpuDevice->useMultiDrawIndirect = deviceFeatures.multiDrawIndirect;
-    _gpuDevice->useDescriptorUpdateTemplate = _gpuDevice->minorVersion > 0 || checkExtension(VK_KHR_DESCRIPTOR_UPDATE_TEMPLATE_EXTENSION_NAME);
+    _gpuDevice->useDescriptorUpdateTemplate = true; // Vulkan 1.1 baseline core.
 
     if (_gpuDevice->minorVersion > 1) {
         _gpuDevice->createRenderPass2 = vkCreateRenderPass2;
@@ -353,6 +718,7 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
     allocatorInfo.physicalDevice = _gpuContext->physicalDevice;
     allocatorInfo.device = _gpuDevice->vkDevice;
     allocatorInfo.instance = _gpuContext->vkInstance;
+    allocatorInfo.vulkanApiVersion = _gpuDevice->apiVersionInfo.effectiveDeviceApiVersion;
 
     VmaVulkanFunctions vmaVulkanFunc{};
     vmaVulkanFunc.vkAllocateMemory = vkAllocateMemory;
@@ -373,30 +739,15 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
     vmaVulkanFunc.vkUnmapMemory = vkUnmapMemory;
     vmaVulkanFunc.vkCmdCopyBuffer = vkCmdCopyBuffer;
 
-    if (_gpuDevice->minorVersion > 0) {
-        allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_KHR_DEDICATED_ALLOCATION_BIT;
-        vmaVulkanFunc.vkGetBufferMemoryRequirements2KHR = vkGetBufferMemoryRequirements2;
-        vmaVulkanFunc.vkGetImageMemoryRequirements2KHR = vkGetImageMemoryRequirements2;
-        vmaVulkanFunc.vkBindBufferMemory2KHR = vkBindBufferMemory2;
-        vmaVulkanFunc.vkBindImageMemory2KHR = vkBindImageMemory2;
-    } else {
-        if (checkExtension(VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME) &&
-            checkExtension(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME)) {
-            allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_KHR_DEDICATED_ALLOCATION_BIT;
-            vmaVulkanFunc.vkGetBufferMemoryRequirements2KHR = vkGetBufferMemoryRequirements2KHR;
-            vmaVulkanFunc.vkGetImageMemoryRequirements2KHR = vkGetImageMemoryRequirements2KHR;
-        }
-        if (checkExtension(VK_KHR_BIND_MEMORY_2_EXTENSION_NAME)) {
-            vmaVulkanFunc.vkBindBufferMemory2KHR = vkBindBufferMemory2KHR;
-            vmaVulkanFunc.vkBindImageMemory2KHR = vkBindImageMemory2KHR;
-        }
-    }
-    if (checkExtension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
-        if (_gpuDevice->minorVersion > 0) {
-            vmaVulkanFunc.vkGetPhysicalDeviceMemoryProperties2KHR = vkGetPhysicalDeviceMemoryProperties2;
-        } else if (checkExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
-            vmaVulkanFunc.vkGetPhysicalDeviceMemoryProperties2KHR = vkGetPhysicalDeviceMemoryProperties2KHR;
-        }
+    // VMA's table retains KHR member names; they bind to Vulkan 1.1 core entries.
+    vmaVulkanFunc.vkGetBufferMemoryRequirements2KHR = vkGetBufferMemoryRequirements2;
+    vmaVulkanFunc.vkGetImageMemoryRequirements2KHR = vkGetImageMemoryRequirements2;
+    vmaVulkanFunc.vkBindBufferMemory2KHR = vkBindBufferMemory2;
+    vmaVulkanFunc.vkBindImageMemory2KHR = vkBindImageMemory2;
+    vmaVulkanFunc.vkGetPhysicalDeviceMemoryProperties2KHR = vkGetPhysicalDeviceMemoryProperties2;
+    if (_gpuDevice->minorVersion >= 3) {
+        vmaVulkanFunc.vkGetDeviceBufferMemoryRequirements = vkGetDeviceBufferMemoryRequirements;
+        vmaVulkanFunc.vkGetDeviceImageMemoryRequirements = vkGetDeviceImageMemoryRequirements;
     }
 
     allocatorInfo.pVulkanFunctions = &vmaVulkanFunc;
@@ -406,6 +757,7 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
     uint32_t backBufferCount = _gpuDevice->backBufferCount;
     for (uint32_t i = 0U; i < backBufferCount; i++) {
         _gpuFencePools.push_back(std::make_unique<CCVKGPUFencePool>(_gpuDevice.get()));
+        _gpuSemaphorePools.push_back(std::make_unique<CCVKGPUSemaphorePool>(_gpuDevice.get()));
         _gpuRecycleBins.push_back(std::make_unique<CCVKGPURecycleBin>(_gpuDevice.get()));
         _gpuStagingBufferPools.push_back(std::make_unique<CCVKGPUStagingBufferPool>(_gpuDevice.get()));
     }
@@ -414,7 +766,6 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
     _gpuIAHub = std::make_unique<CCVKGPUInputAssemblerHub>(_gpuDevice.get());
     _gpuTransportHub = std::make_unique<CCVKGPUTransportHub>(_gpuDevice.get(), static_cast<CCVKQueue *>(_queue)->gpuQueue());
     _gpuDescriptorHub = std::make_unique<CCVKGPUDescriptorHub>(_gpuDevice.get());
-    _gpuSemaphorePool = std::make_unique<CCVKGPUSemaphorePool>(_gpuDevice.get());
     _gpuBarrierManager = std::make_unique<CCVKGPUBarrierManager>(_gpuDevice.get());
     _gpuDescriptorSetHub = std::make_unique<CCVKGPUDescriptorSetHub>(_gpuDevice.get());
 
@@ -462,7 +813,7 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
     cmdFuncCCVKCreateGeneralBarrier(this, &_gpuDevice->defaultDepthStencilBarrier);
 
     _pipelineCache = std::make_unique<CCVKPipelineCache>();
-    _pipelineCache->init(_gpuDevice->vkDevice);
+    _pipelineCache->init(_gpuDevice->vkDevice, _gpuContext->physicalDeviceProperties);
 
     ///////////////////// Print Debug Info /////////////////////
 
@@ -508,7 +859,14 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
 }
 
 void CCVKDevice::doDestroy() {
+    if (_queue && _gpuTransportHub && _gpuDevice && _gpuDevice->vkDevice) {
+        for (auto *swapchain : _gpuDevice->swapchains) abortAcquiredSwapchain(swapchain);
+    }
     waitAllFences();
+    if (_gpuDevice && _gpuDevice->vkDevice) VK_CHECK(vkDeviceWaitIdle(_gpuDevice->vkDevice));
+
+    // Release typed recording references while descriptor/IA hubs and bins live.
+    if (_gpuDevice) _gpuDevice->recordingSubmissions.clear();
 
     SPIRVUtils::getInstance()->destroy();
 
@@ -528,7 +886,7 @@ void CCVKDevice::doDestroy() {
 
     _gpuBufferHub = nullptr;
     _gpuTransportHub = nullptr;
-    _gpuSemaphorePool = nullptr;
+    _gpuSemaphorePools.clear();
     _gpuDescriptorHub = nullptr;
     _gpuBarrierManager = nullptr;
     _gpuDescriptorSetHub = nullptr;
@@ -548,9 +906,9 @@ void CCVKDevice::doDestroy() {
         _pipelineCache.reset();
 
         if (_gpuDevice->memoryAllocator != VK_NULL_HANDLE) {
-            VmaStats stats;
-            vmaCalculateStats(_gpuDevice->memoryAllocator, &stats);
-            CC_LOG_INFO("Total device memory leaked: %d bytes.", stats.total.usedBytes);
+            VmaTotalStatistics stats{};
+            vmaCalculateStatistics(_gpuDevice->memoryAllocator, &stats);
+            CC_LOG_INFO("Total device memory leaked: %llu bytes.", static_cast<unsigned long long>(stats.total.statistics.allocationBytes));
             CC_ASSERT(!_memoryStatus.bufferSize);  // Buffer memory leaked.
             CC_ASSERT(!_memoryStatus.textureSize); // Texture memory leaked.
 
@@ -565,6 +923,7 @@ void CCVKDevice::doDestroy() {
         _gpuDevice->_descriptorSetPools.clear();
 
         if (_gpuDevice->vkDevice != VK_NULL_HANDLE) {
+            _gpuDevice->shutdownCompletionTrackers();
             vkDestroyDevice(_gpuDevice->vkDevice, nullptr);
             _gpuDevice->vkDevice = VK_NULL_HANDLE;
         }
@@ -572,6 +931,10 @@ void CCVKDevice::doDestroy() {
         _gpuDevice = nullptr;
     }
 
+    if (_gpuContext) {
+        _gpuContext->destroy();
+        _lastValidationErrorCount = _gpuContext->validationErrorCount.load(std::memory_order_relaxed);
+    }
     _gpuContext = nullptr;
 }
 
@@ -608,72 +971,193 @@ VkImageMemoryBarrier presentBarrier{
 };
 } // namespace
 
+void CCVKDevice::abortAcquiredSwapchain(CCVKGPUSwapchain *swapchain) {
+    const auto found = std::find(gpuSwapchains.begin(), gpuSwapchains.end(), swapchain);
+    if (found == gpuSwapchains.end()) return; // includes the independent XR path
+    const size_t slot = static_cast<size_t>(found - gpuSwapchains.begin());
+    const uint32_t imageIndex = vkSwapchainIndices[slot];
+    auto *queue = static_cast<CCVKQueue *>(_queue);
+    auto *gpuQueue = queue->gpuQueue();
+
+    // Complete only engine transport here, never an abandoned user's CB.
+    // This consumes every acquire wait in the batch; other windows retain
+    // their acquired image and their own render-finished signal afterwards.
+    if (!gpuQueue->presentSemaphoresSignaled || !_gpuTransportHub->empty(false) || !_gpuTransportHub->empty(true)) {
+        queue->submit(nullptr, 0);
+    }
+    const VkSemaphore signal = gpuQueue->lastSignaledSemaphores[slot];
+    const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VulkanSubmitBatch drain;
+    drain.waits.push_back({signal, stage});
+    const VkFence fence = gpuQueue->completionTracker->usesTimeline() ? VK_NULL_HANDLE : gpuFencePool()->alloc();
+    GpuCompletionPoint drainPoint;
+    VK_CHECK(_gpuDevice->submitTracked(gpuQueue, drain, fence, drainPoint));
+    VK_CHECK(gpuQueue->completionTracker->wait(drainPoint, DEFAULT_TIMEOUT));
+    swapchain->imageGeneration->imageAcquired[imageIndex] = false;
+
+    if (_gpuDevice->capabilities.swapchainMaintenance1.enabled) {
+        VkReleaseSwapchainImagesInfoEXT release{VK_STRUCTURE_TYPE_RELEASE_SWAPCHAIN_IMAGES_INFO_EXT};
+        release.swapchain = swapchain->vkSwapchain;
+        release.imageIndexCount = 1;
+        release.pImageIndices = &imageIndex;
+        const VkResult result = vkReleaseSwapchainImagesEXT(_gpuDevice->vkDevice, &release);
+        if (result == VK_SUCCESS) swapchain->wsi.onAcquiredImageReleased();
+        else swapchain->wsi.onRecreateFailure(result);
+    } else {
+        // Base WSI has no image-release command. Retire this window's chain
+        // after consumption; zero-size/surface-loss must not trigger present.
+        waitAllFences();
+#if CC_SWAPPY_ENABLED
+        SwappyVk_destroySwapchain(_gpuDevice->vkDevice, swapchain->vkSwapchain);
+#endif
+        swapchain->surfaceOwner->retireGenerations();
+        swapchain->imageGeneration.reset();
+        swapchain->swapchainImages.clear();
+        swapchain->vkSwapchain = VK_NULL_HANDLE;
+        swapchain->createInfo.oldSwapchain = VK_NULL_HANDLE;
+        swapchain->wsi.requestRecreate();
+    }
+    swapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
+
+    gpuQueue->lastSignaledSemaphores.erase(gpuQueue->lastSignaledSemaphores.begin() + slot);
+    gpuQueue->acquiredSwapchains.erase(gpuQueue->acquiredSwapchains.begin() + slot);
+    gpuSwapchains.erase(gpuSwapchains.begin() + slot);
+    vkSwapchains.erase(vkSwapchains.begin() + slot);
+    vkSwapchainIndices.erase(vkSwapchainIndices.begin() + slot);
+    gpuQueue->presentSemaphoresSignaled = !gpuSwapchains.empty();
+
+    prepareWSISubmit(gpuQueue);
+}
+
+void CCVKDevice::prepareWSISubmit(CCVKGPUQueue *queue) {
+    if (!_options.enableBarrierDeduce || queue->acquiredSwapchains.empty() ||
+        !queue->presentSemaphoresSignaled || queue->wsiTransitionsQueued) return;
+
+    // A previous submit consumed the batch's late PRESENT transitions. Each
+    // further actual submit needs a new matching pair, including independent
+    // A/B draws after an abort. Keep both transitions in that existing submit.
+    ccstd::vector<VkImageMemoryBarrier> restore, finish;
+    for (const auto *swapchain : queue->acquiredSwapchains) {
+        restore.push_back(acquireBarrier);
+        finish.push_back(presentBarrier);
+        restore.back().image = finish.back().image = swapchain->swapchainImages[swapchain->curImageIndex];
+    }
+    _gpuTransportHub->checkIn([&](const CCVKGPUCommandBuffer *cmd) {
+        cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), cmd->vkCommandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                             0, 0, nullptr, 0, nullptr, utils::toUint(restore.size()), restore.data());
+    });
+    _gpuTransportHub->checkIn([&](const CCVKGPUCommandBuffer *cmd) {
+        cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), cmd->vkCommandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                             0, 0, nullptr, 0, nullptr, utils::toUint(finish.size()), finish.data());
+    }, false, true);
+    queue->wsiTransitionsQueued = true;
+}
+
 void CCVKDevice::acquire(Swapchain *const *swapchains, uint32_t count) {
+    // A repeated acquire is an abandoned prior frame, not permission to drop
+    // its semaphore waits or leave images owned by the application.
+    while (!gpuSwapchains.empty()) abortAcquiredSwapchain(gpuSwapchains.back());
     if (_onAcquire) _onAcquire->execute();
 
     auto *queue = static_cast<CCVKQueue *>(_queue);
     queue->gpuQueue()->lastSignaledSemaphores.clear();
+    queue->gpuQueue()->acquiredSwapchains.clear();
+    queue->gpuQueue()->presentSemaphoresSignaled = false;
+    queue->gpuQueue()->wsiTransitionsQueued = false;
     vkSwapchainIndices.clear();
     gpuSwapchains.clear();
     vkSwapchains.clear();
-    vkAcquireBarriers.resize(count, acquireBarrier);
-    vkPresentBarriers.resize(count, presentBarrier);
+    vkAcquireBarriers.clear();
+    vkPresentBarriers.clear();
     for (uint32_t i = 0U; i < count; ++i) {
         auto *swapchain = static_cast<CCVKSwapchain *>(swapchains[i]);
-        if (swapchain->gpuSwapchain()->lastPresentResult == VK_NOT_READY) {
+        auto *gpuSwapchain = swapchain->gpuSwapchain();
+        if (!gpuSwapchain) continue;
+        if (gpuSwapchain->runtimeOwnedImages) {
+            // XR owns its images/acquire/release, never pair them with the
+            // window-system VkSwapchain vectors.
+            if (gpuSwapchain->lastPresentResult == VK_NOT_READY && !swapchain->checkSwapchainStatus()) continue;
+            const xr::XRSwapchain acquired = _xr->doGFXDeviceAcquire(_api);
+            gpuSwapchain->curImageIndex = acquired.swapchainImageIndex;
+            if (!gpuSwapchain->hasRenderableImage()) {
+                gpuSwapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
+                CC_LOG_ERROR("XR acquired an invalid swapchain image index.");
+            }
+            continue;
+        }
+        gpuSwapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
+        if (gpuSwapchain->wsi.hasFatalError() || gpuSwapchain->wsi.needsSurfaceRecreate()) continue;
+        if (!gpuSwapchain->wsi.canAcquire() || gpuSwapchain->lastPresentResult != VK_SUCCESS) {
             if (!swapchain->checkSwapchainStatus()) {
                 continue;
             }
         }
-
-        if (_xr) {
-            xr::XRSwapchain xrSwapchain = _xr->doGFXDeviceAcquire(_api);
-            swapchain->gpuSwapchain()->curImageIndex = xrSwapchain.swapchainImageIndex;
+        if (!gpuSwapchain->vkSwapchain || !gpuSwapchain->wsi.beginAcquire()) continue;
+        uint32_t imageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
+        VkSemaphore acquireSemaphore = gpuSemaphorePool()->alloc();
+        const VkResult res = vkAcquireNextImageKHR(_gpuDevice->vkDevice, gpuSwapchain->vkSwapchain, ~0ULL,
+                                                 acquireSemaphore, VK_NULL_HANDLE, &imageIndex);
+        if (!gpuSwapchain->wsi.completeAcquire(res, imageIndex)) {
+            gpuSwapchain->lastPresentResult = res;
+            if (gpuSwapchain->wsi.hasFatalError()) CC_LOG_ERROR("Vulkan acquire failed fatally: %d", gpuSwapchain->wsi.fatalResult());
+            continue;
         }
-        if (swapchain->gpuSwapchain()->vkSwapchain) {
-            vkSwapchains.push_back(swapchain->gpuSwapchain()->vkSwapchain);
-        }
-        if (swapchain->gpuSwapchain()) {
-            gpuSwapchains.push_back(swapchain->gpuSwapchain());
-        }
-        vkSwapchainIndices.push_back(swapchain->gpuSwapchain()->curImageIndex);
-    }
-
-    _gpuDescriptorSetHub->flush();
-    _gpuSemaphorePool->reset();
-
-    for (uint32_t i = 0; i < vkSwapchains.size(); ++i) {
-        VkSemaphore acquireSemaphore = _gpuSemaphorePool->alloc();
-        VkResult res = vkAcquireNextImageKHR(_gpuDevice->vkDevice, vkSwapchains[i], ~0ULL,
-                                             acquireSemaphore, VK_NULL_HANDLE, &vkSwapchainIndices[i]);
-        CC_ASSERT(res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR);
-        gpuSwapchains[i]->curImageIndex = vkSwapchainIndices[i];
+        gpuSwapchain->curImageIndex = imageIndex;
+        // Append all paired arrays together, exclusively after acquisition.
+        vkSwapchains.push_back(gpuSwapchain->vkSwapchain);
+        gpuSwapchains.push_back(gpuSwapchain);
+        vkSwapchainIndices.push_back(imageIndex);
         queue->gpuQueue()->lastSignaledSemaphores.push_back(acquireSemaphore);
-
-        vkAcquireBarriers[i].image = gpuSwapchains[i]->swapchainImages[vkSwapchainIndices[i]];
-        vkPresentBarriers[i].image = gpuSwapchains[i]->swapchainImages[vkSwapchainIndices[i]];
+        queue->gpuQueue()->acquiredSwapchains.push_back(gpuSwapchain);
+        auto &generation = *gpuSwapchain->imageGeneration;
+        generation.imageAcquired[imageIndex] = true;
+        ++generation.acquireSerials[imageIndex];
+        // Reacquisition followed by the submit wait protects reuse of this
+        // image's present semaphore. A separate present fence protects host
+        // reset/destruction when maintenance1 was actually enabled.
+        if (!generation.presentFences.empty() && generation.presentPending[imageIndex]) {
+            const VkFence fence = generation.presentFences[imageIndex];
+            VK_CHECK(vkWaitForFences(_gpuDevice->vkDevice, 1, &fence, VK_TRUE, DEFAULT_TIMEOUT));
+            VK_CHECK(vkResetFences(_gpuDevice->vkDevice, 1, &fence));
+            generation.presentPending[imageIndex] = false;
+        }
+        if (_options.enableBarrierDeduce || !generation.imageInitialized[imageIndex]) {
+            vkAcquireBarriers.push_back(acquireBarrier);
+            vkAcquireBarriers.back().image = gpuSwapchain->swapchainImages[imageIndex];
+            if (!generation.imageInitialized[imageIndex]) vkAcquireBarriers.back().oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            if (!_options.enableBarrierDeduce) {
+                vkAcquireBarriers.back().newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+                vkAcquireBarriers.back().dstAccessMask = 0;
+            }
+        }
+        generation.imageInitialized[imageIndex] = true;
+        vkPresentBarriers.push_back(presentBarrier);
+        vkPresentBarriers.back().image = gpuSwapchain->swapchainImages[imageIndex];
     }
+    _gpuDescriptorSetHub->flush();
 
-    if (this->_options.enableBarrierDeduce) {
+    if (!vkAcquireBarriers.empty()) {
         _gpuTransportHub->checkIn(
             [&](const CCVKGPUCommandBuffer *gpuCommandBuffer) {
-                vkCmdPipelineBarrier(gpuCommandBuffer->vkCommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                     0, 0, nullptr, 0, nullptr, utils::toUint(vkSwapchains.size()), vkAcquireBarriers.data());
+                cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), gpuCommandBuffer->vkCommandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                     0, 0, nullptr, 0, nullptr, utils::toUint(vkAcquireBarriers.size()), vkAcquireBarriers.data());
             },
             false, false);
 
+    }
+    if (this->_options.enableBarrierDeduce && !vkPresentBarriers.empty()) {
         _gpuTransportHub->checkIn(
             [&](const CCVKGPUCommandBuffer *gpuCommandBuffer) {
-                vkCmdPipelineBarrier(gpuCommandBuffer->vkCommandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), gpuCommandBuffer->vkCommandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                                      0, 0, nullptr, 0, nullptr, utils::toUint(vkSwapchains.size()), vkPresentBarriers.data());
             },
             false, true);
+        queue->gpuQueue()->wsiTransitionsQueued = true;
     }
 }
 
 void CCVKDevice::present() {
     CC_PROFILE(CCVKDevicePresent);
-    bool isGFXDeviceNeedsPresent = _xr ? _xr->isGFXDeviceNeedsPresent(_api) : true;
     auto *queue = static_cast<CCVKQueue *>(_queue);
     _numDrawCalls = queue->_numDrawCalls;
     _numInstances = queue->_numInstances;
@@ -682,8 +1166,13 @@ void CCVKDevice::present() {
     queue->_numInstances = 0;
     queue->_numTriangles = 0;
 
-    if (!_gpuTransportHub->empty(false)) _gpuTransportHub->packageForFlight(false);
-    if (!_gpuTransportHub->empty(true)) _gpuTransportHub->packageForFlight(true);
+    // Frames with an acquired image and no user command buffer still need
+    // their acquisition waits and layout transport submitted before present.
+    // Existing submitted frames do not get a second signal-only submit.
+    if ((!vkSwapchains.empty() && !queue->gpuQueue()->presentSemaphoresSignaled) ||
+        !_gpuTransportHub->empty(false) || !_gpuTransportHub->empty(true)) {
+        queue->submit(nullptr, 0);
+    }
 
 #if CC_SWAPPY_ENABLED
     // tripple buffer?
@@ -702,12 +1191,49 @@ void CCVKDevice::present() {
         presentInfo.swapchainCount = utils::toUint(vkSwapchains.size());
         presentInfo.pSwapchains = vkSwapchains.data();
         presentInfo.pImageIndices = vkSwapchainIndices.data();
+        ccstd::vector<VkResult> results(vkSwapchains.size(), VK_SUCCESS);
+        presentInfo.pResults = results.data();
+        ccstd::vector<VkFence> presentFences;
+        VkSwapchainPresentFenceInfoEXT fenceInfo{VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT};
+        if (_gpuDevice->capabilities.swapchainMaintenance1.enabled) {
+            for (size_t i = 0; i < gpuSwapchains.size(); ++i) {
+                presentFences.push_back(gpuSwapchains[i]->imageGeneration->presentFences[vkSwapchainIndices[i]]);
+            }
+            fenceInfo.swapchainCount = utils::toUint(presentFences.size());
+            fenceInfo.pFences = presentFences.data();
+            presentInfo.pNext = &fenceInfo;
+        }
 
-        VkResult res = !isGFXDeviceNeedsPresent ? VK_SUCCESS : vkCCPresentFunc(queue->gpuQueue()->vkQueue, &presentInfo);
-        for (auto *gpuSwapchain : gpuSwapchains) {
-            gpuSwapchain->lastPresentResult = res;
+        // Window-system images are released independently of the XR runtime.
+        VkResult res = vkCCPresentFunc(queue->gpuQueue()->vkQueue, &presentInfo);
+        for (size_t i = 0; i < gpuSwapchains.size(); ++i) {
+            // OOM/device loss may fail to enqueue the entire operation; WSI
+            // per-swapchain results otherwise supersede the aggregate result.
+            const VkResult result = res == VK_ERROR_DEVICE_LOST || res == VK_ERROR_OUT_OF_HOST_MEMORY ||
+                                            res == VK_ERROR_OUT_OF_DEVICE_MEMORY ? res : results[i];
+            gpuSwapchains[i]->lastPresentResult = result;
+            gpuSwapchains[i]->imageGeneration->imageAcquired[vkSwapchainIndices[i]] = false;
+            if (!presentFences.empty() &&
+                (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR || result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_ERROR_SURFACE_LOST_KHR)) {
+                gpuSwapchains[i]->imageGeneration->presentPending[vkSwapchainIndices[i]] = true;
+            }
+            gpuSwapchains[i]->wsi.onPresentResult(result);
+            gpuSwapchains[i]->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
         }
     }
+    for (auto *swapchain : _gpuDevice->swapchains) {
+        if (swapchain->runtimeOwnedImages) swapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
+    }
+    // Present has consumed this frame's ownership. Offscreen work submitted
+    // before the next acquire must not wait on a semaphore already handed to
+    // presentation, or index an image using INVALID_IMAGE_INDEX.
+    queue->gpuQueue()->lastSignaledSemaphores.clear();
+    queue->gpuQueue()->acquiredSwapchains.clear();
+    queue->gpuQueue()->presentSemaphoresSignaled = false;
+    queue->gpuQueue()->wsiTransitionsQueued = false;
+    vkSwapchains.clear();
+    vkSwapchainIndices.clear();
+    gpuSwapchains.clear();
 
     _gpuDevice->curBackBufferIndex = (_gpuDevice->curBackBufferIndex + 1) % _gpuDevice->backBufferCount;
 
@@ -717,10 +1243,23 @@ void CCVKDevice::present() {
                                  gpuFencePool()->data(), VK_TRUE, DEFAULT_TIMEOUT));
     }
 
+    VK_CHECK(_gpuDevice->observeCompletedFences(gpuFencePool()->data(), fenceCount));
+    // Bulk fence observation covers ordinary submissions from this slot.
+    // Cross-slot buffer-instance points must be waited with either backend.
+    const auto slotResult = _gpuDevice->waitSlot(_gpuDevice->curBackBufferIndex, DEFAULT_TIMEOUT);
+    VK_CHECK(slotResult);
+    if (slotResult != VK_SUCCESS) return;
+    if (!_gpuDevice->slotComplete(_gpuDevice->curBackBufferIndex)) {
+        CC_LOG_ERROR("Vulkan slot retirement rejected: GPU completion is not proven.");
+        return;
+    }
     gpuFencePool()->reset();
+    gpuSemaphorePool()->reset(); // the slot's submission waits have completed
+    _gpuDevice->retireRecordings();
     gpuRecycleBin()->clear();
     gpuStagingBufferPool()->reset();
     gpuStagingBufferPool()->shrinkSize();
+    if (_pipelineCache) _pipelineCache->checkpoint();
     if (_xr) {
         _xr->postGFXDevicePresent(_api);
     }
@@ -729,11 +1268,33 @@ void CCVKDevice::present() {
 void CCVKDevice::frameSync() {
 }
 
+VulkanCompletionObjectCounts CCVKDevice::completionObjectCounts() const {
+    VulkanCompletionObjectCounts counts;
+    for (const auto &pool : _gpuFencePools) counts.fences += pool->allocatedCount();
+    for (const auto &pool : _gpuSemaphorePools) counts.semaphores += pool->allocatedCount();
+    if (_gpuTransportHub) counts.fences += _gpuTransportHub->allocatedFenceCount();
+    if (_gpuDevice) counts.semaphores += static_cast<uint32_t>(_gpuDevice->completionSemaphores.size());
+    return counts;
+}
+
 CCVKGPUFencePool *CCVKDevice::gpuFencePool() { return _gpuFencePools[_gpuDevice->curBackBufferIndex].get(); }
 CCVKGPURecycleBin *CCVKDevice::gpuRecycleBin() { return _gpuRecycleBins[_gpuDevice->curBackBufferIndex].get(); }
 CCVKGPUStagingBufferPool *CCVKDevice::gpuStagingBufferPool() { return _gpuStagingBufferPools[_gpuDevice->curBackBufferIndex].get(); }
+CCVKGPUSemaphorePool *CCVKDevice::gpuSemaphorePool() const { return _gpuSemaphorePools[_gpuDevice->curBackBufferIndex].get(); }
 
 void CCVKDevice::waitAllFences() {
+    if (!_gpuDevice || !_gpuDevice->vkDevice) return;
+    if (_gpuDevice->runtimePaths.useTimelineSemaphore) {
+        for (auto &entry : _gpuDevice->completionTrackers) {
+            const auto value = entry.second->submittedValue();
+            if (!value) continue;
+            const auto result = entry.second->wait({entry.second->domain(), value}, DEFAULT_TIMEOUT);
+            VK_CHECK(result);
+            if (result != VK_SUCCESS) return;
+        }
+        _gpuDevice->retireRecordings();
+        return;
+    }
     static ccstd::vector<VkFence> fences;
     fences.clear();
 
@@ -744,16 +1305,25 @@ void CCVKDevice::waitAllFences() {
     if (!fences.empty()) {
         VK_CHECK(vkWaitForFences(_gpuDevice->vkDevice, utils::toUint(fences.size()), fences.data(), VK_TRUE, DEFAULT_TIMEOUT));
 
+        VK_CHECK(_gpuDevice->observeCompletedFences(fences.data(), utils::toUint(fences.size())));
+        for (uint32_t slot = 0; slot < _gpuFencePools.size(); ++slot) {
+            if (!_gpuDevice->slotComplete(slot)) {
+                CC_LOG_ERROR("Vulkan fence reset rejected: GPU completion is not proven.");
+                return;
+            }
+        }
         for (auto &fencePool : _gpuFencePools) {
             fencePool->reset();
         }
     }
+    _gpuDevice->retireRecordings();
 }
 
 void CCVKDevice::updateBackBufferCount(uint32_t backBufferCount) {
     if (backBufferCount <= _gpuDevice->backBufferCount) return;
     for (uint32_t i = _gpuDevice->backBufferCount; i < backBufferCount; i++) {
         _gpuFencePools.push_back(std::make_unique<CCVKGPUFencePool>(_gpuDevice.get()));
+        _gpuSemaphorePools.push_back(std::make_unique<CCVKGPUSemaphorePool>(_gpuDevice.get()));
         _gpuRecycleBins.push_back(std::make_unique<CCVKGPURecycleBin>(_gpuDevice.get()));
         _gpuStagingBufferPools.push_back(std::make_unique<CCVKGPUStagingBufferPool>(_gpuDevice.get()));
     }
@@ -832,8 +1402,9 @@ void CCVKDevice::initFormatFeature() {
 
 void CCVKDevice::initExtensionCapability() {
     _caps.supportVariableRateShading = checkExtension(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
-    _caps.supportVariableRateShading &= _gpuContext->physicalDeviceFragmentShadingRateFeatures.pipelineFragmentShadingRate &&
-                                        _gpuContext->physicalDeviceFragmentShadingRateFeatures.attachmentFragmentShadingRate;
+    _caps.supportVariableRateShading &= _gpuDevice->capabilities.fragmentShadingRateDetail.pipelineFragmentShadingRate.enabled &&
+                                        _gpuDevice->capabilities.fragmentShadingRateDetail.attachmentFragmentShadingRate.enabled;
+    _caps.supportVariableRateShading &= vkCmdSetFragmentShadingRateKHR != nullptr;
     _caps.supportVariableRateShading &= hasFlag(_formatFeatures[static_cast<uint32_t>(Format::R8UI)], FormatFeatureBit::SHADING_RATE);
 
     _caps.supportSubPassShading = checkExtension(VK_HUAWEI_SUBPASS_SHADING_EXTENSION_NAME);

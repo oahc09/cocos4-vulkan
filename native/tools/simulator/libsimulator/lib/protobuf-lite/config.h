@@ -30,6 +30,15 @@
 /* protobuf config.h for MSVC.  On other platforms, this is generated
  * automatically by autoheader / autoconf / configure. */
 
+#if defined(_MSC_VER) && _MSC_VER >= 1600
+/* Use the standard hash containers available in MSVC 2010 and later. */
+#define GOOGLE_PROTOBUF_USE_STD_UNORDERED 1
+#define HASH_MAP_CLASS unordered_map
+#define HASH_MAP_H <unordered_map>
+#define HASH_NAMESPACE std
+#define HASH_SET_CLASS unordered_set
+#define HASH_SET_H <unordered_set>
+#else
 /* the location of <hash_map> */
 #define HASH_MAP_H <hash_map>
 
@@ -46,6 +55,7 @@
 
 /* the location of <hash_set> */
 #define HASH_SET_H <hash_set>
+#endif
 
 /* define if the compiler has hash_map */
 #define HAVE_HASH_MAP 1

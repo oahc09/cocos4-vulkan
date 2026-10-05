@@ -102,7 +102,8 @@ class hash_set : public std::set<Key, HashFcn> {
   hash_set(int = 0) {}
 };
 
-#elif defined(_MSC_VER) && !defined(_STLPORT_VERSION)
+#elif defined(_MSC_VER) && !defined(_STLPORT_VERSION) && \
+    !defined(GOOGLE_PROTOBUF_USE_STD_UNORDERED)
 
 template <typename Key>
 struct hash : public HASH_NAMESPACE::hash_compare<Key> {
@@ -166,9 +167,26 @@ struct hash<const char*> {
   }
 };
 
+#ifdef GOOGLE_PROTOBUF_USE_STD_UNORDERED
+// Preserve the legacy Windows C-string comparison by contents.
+template <typename Key>
+struct default_equal : public std::equal_to<Key> {};
+
+template <>
+struct default_equal<const char*> {
+  inline bool operator()(const char* a, const char* b) const {
+    return strcmp(a, b) == 0;
+  }
+};
+#endif
+
 template <typename Key, typename Data,
           typename HashFcn = hash<Key>,
+#ifdef GOOGLE_PROTOBUF_USE_STD_UNORDERED
+          typename EqualKey = default_equal<Key> >
+#else
           typename EqualKey = std::equal_to<Key> >
+#endif
 class hash_map : public HASH_NAMESPACE::HASH_MAP_CLASS<
     Key, Data, HashFcn, EqualKey> {
  public:
@@ -177,7 +195,11 @@ class hash_map : public HASH_NAMESPACE::HASH_MAP_CLASS<
 
 template <typename Key,
           typename HashFcn = hash<Key>,
+#ifdef GOOGLE_PROTOBUF_USE_STD_UNORDERED
+          typename EqualKey = default_equal<Key> >
+#else
           typename EqualKey = std::equal_to<Key> >
+#endif
 class hash_set : public HASH_NAMESPACE::HASH_SET_CLASS<
     Key, HashFcn, EqualKey> {
  public:

@@ -45,6 +45,62 @@
 namespace cc {
 namespace gfx {
 
+CCVKGPUWSISurface::~CCVKGPUWSISurface() {
+    if (surface) vkDestroySurfaceKHR(instance, surface, nullptr);
+}
+
+void CCVKGPUWSISurface::retireGenerations() {
+    for (const auto &weak : generations) {
+        if (auto generation = weak.lock()) {
+            if (!generation->retired) {
+                generation->waitForPresentCompletion();
+                generation->releaseVulkanObjects();
+            }
+        }
+    }
+    generations.clear();
+}
+
+void CCVKGPUWSIGeneration::waitForPresentCompletion() {
+    if (presentFences.empty()) {
+        // Pure core WSI has no host presentation-completion primitive. This
+        // is the conventional retirement fallback, not a normative proof.
+        // Never used for ordinary frame pacing or semaphore reuse.
+        VK_CHECK(vkDeviceWaitIdle(device));
+    } else {
+        for (size_t i = 0; i < presentFences.size(); ++i) {
+            if (presentPending[i]) {
+                VK_CHECK(vkWaitForFences(device, 1, &presentFences[i], VK_TRUE, DEFAULT_TIMEOUT));
+                presentPending[i] = false;
+            }
+        }
+    }
+}
+
+void CCVKGPUWSIGeneration::releaseVulkanObjects() {
+    if (retired) return;
+    retired = true;
+    // CPU wrappers may still refer to this invalidated generation. All GPU
+    // work/presentation has completed; stale generation gates reject reuse.
+    // Removing dependent Vulkan objects first also permits a NEW surface to
+    // attach to the same native window (otherwise NATIVE_WINDOW_IN_USE).
+    for (auto framebuffer : framebuffers) vkDestroyFramebuffer(device, framebuffer, nullptr);
+    framebuffers.clear();
+    for (auto view : imageViews) vkDestroyImageView(device, view, nullptr);
+    imageViews.clear();
+    for (auto semaphore : renderFinished) vkDestroySemaphore(device, semaphore, nullptr);
+    for (auto fence : presentFences) vkDestroyFence(device, fence, nullptr);
+    renderFinished.clear();
+    presentFences.clear();
+    if (swapchain) vkDestroySwapchainKHR(device, swapchain, nullptr);
+    swapchain = VK_NULL_HANDLE;
+    surface.reset();
+}
+
+CCVKGPUWSIGeneration::~CCVKGPUWSIGeneration() {
+    releaseVulkanObjects();
+}
+
 CCVKSwapchain::CCVKSwapchain() {
     _typedID = generateObjectID<decltype(this)>();
     _preRotationEnabled = ENABLE_PRE_ROTATION;
@@ -62,10 +118,47 @@ void CCVKSwapchain::doInit(const SwapchainInfo &info) {
     auto *gpuDevice = CCVKDevice::getInstance()->gpuDevice();
     const auto *gpuContext = CCVKDevice::getInstance()->gpuContext();
     _gpuSwapchain = ccnew CCVKGPUSwapchain;
+    _gpuSwapchain->runtimeOwnedImages = _xr != nullptr;
+    _gpuSwapchain->wsi.setExtent(info.width, info.height);
     gpuDevice->swapchains.insert(_gpuSwapchain);
 
     createVkSurface();
 
+    Format colorFmt = selectSurfaceConfig();
+    const Format depthStencilFmt = Format::DEPTH_STENCIL;
+    ///////////////////// Texture Creation /////////////////////
+    auto width = static_cast<int32_t>(info.width);
+    auto height = static_cast<int32_t>(info.height);
+    if (_xr) {
+        colorFmt = _xr->getXRSwapchainFormat();
+        width = _xr->getXRConfig(xr::XRConfigKey::SWAPCHAIN_WIDTH).getInt();
+        height = _xr->getXRConfig(xr::XRConfigKey::SWAPCHAIN_HEIGHT).getInt();
+    }
+    _colorTexture = ccnew CCVKTexture;
+    _depthStencilTexture = ccnew CCVKTexture;
+
+    SwapchainTextureInfo textureInfo;
+    textureInfo.swapchain = this;
+    textureInfo.format = colorFmt;
+    textureInfo.width = width;
+    textureInfo.height = height;
+    initTexture(textureInfo, _colorTexture);
+
+    textureInfo.format = depthStencilFmt;
+    initTexture(textureInfo, _depthStencilTexture);
+
+#if CC_PLATFORM == CC_PLATFORM_ANDROID
+    auto *window = CC_GET_SYSTEM_WINDOW(_windowId);
+    auto viewSize = window->getViewSize();
+    checkSwapchainStatus(viewSize.width, viewSize.height);
+#else
+    checkSwapchainStatus();
+#endif
+}
+
+Format CCVKSwapchain::selectSurfaceConfig() {
+    auto *gpuDevice = CCVKDevice::getInstance()->gpuDevice();
+    const auto *gpuContext = CCVKDevice::getInstance()->gpuContext();
     ///////////////////// Parameter Selection /////////////////////
 
     uint32_t queueFamilyPropertiesCount = utils::toUint(gpuContext->queueFamilyProperties.size());
@@ -92,7 +185,6 @@ void CCVKSwapchain::doInit(const SwapchainInfo &info) {
     }
 
     Format colorFmt = Format::BGRA8;
-    Format depthStencilFmt = Format::DEPTH_STENCIL;
 
     if (_gpuSwapchain->vkSurface != VK_NULL_HANDLE) {
         VkSurfaceCapabilitiesKHR surfaceCapabilities{};
@@ -209,40 +301,17 @@ void CCVKSwapchain::doInit(const SwapchainInfo &info) {
         _gpuSwapchain->createInfo.presentMode = swapchainPresentMode;
         _gpuSwapchain->createInfo.clipped = VK_TRUE; // Setting clipped to VK_TRUE allows the implementation to discard rendering outside of the surface area
     }
-    ///////////////////// Texture Creation /////////////////////
-    auto width = static_cast<int32_t>(info.width);
-    auto height = static_cast<int32_t>(info.height);
-    if (_xr) {
-        colorFmt = _xr->getXRSwapchainFormat();
-        width = _xr->getXRConfig(xr::XRConfigKey::SWAPCHAIN_WIDTH).getInt();
-        height = _xr->getXRConfig(xr::XRConfigKey::SWAPCHAIN_HEIGHT).getInt();
-    }
-    _colorTexture = ccnew CCVKTexture;
-    _depthStencilTexture = ccnew CCVKTexture;
-
-    SwapchainTextureInfo textureInfo;
-    textureInfo.swapchain = this;
-    textureInfo.format = colorFmt;
-    textureInfo.width = width;
-    textureInfo.height = height;
-    initTexture(textureInfo, _colorTexture);
-
-    textureInfo.format = depthStencilFmt;
-    initTexture(textureInfo, _depthStencilTexture);
-
-#if CC_PLATFORM == CC_PLATFORM_ANDROID
-    auto *window = CC_GET_SYSTEM_WINDOW(_windowId);
-    auto viewSize = window->getViewSize();
-    checkSwapchainStatus(viewSize.width, viewSize.height);
-#else
-    checkSwapchainStatus();
-#endif
+    return colorFmt;
 }
 
 void CCVKSwapchain::doDestroy() {
     if (!_gpuSwapchain) return;
 
+    CCVKDevice::getInstance()->abortAcquiredSwapchain(_gpuSwapchain);
     CCVKDevice::getInstance()->waitAllFences();
+    _gpuSwapchain->wsi.setSurfaceAvailable(false);
+    _gpuSwapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
+    if (_gpuSwapchain->surfaceOwner) _gpuSwapchain->surfaceOwner->retireGenerations();
 
     _depthStencilTexture = nullptr;
     _colorTexture = nullptr;
@@ -253,7 +322,7 @@ void CCVKSwapchain::doDestroy() {
     destroySwapchain(gpuDevice);
 
     if (_gpuSwapchain->vkSurface != VK_NULL_HANDLE) {
-        vkDestroySurfaceKHR(gpuContext->vkInstance, _gpuSwapchain->vkSurface, nullptr);
+        _gpuSwapchain->surfaceOwner.reset();
         _gpuSwapchain->vkSurface = VK_NULL_HANDLE;
     }
 
@@ -266,6 +335,8 @@ void CCVKSwapchain::doResize(uint32_t width, uint32_t height, SurfaceTransform /
 }
 
 bool CCVKSwapchain::checkSwapchainStatus(uint32_t width, uint32_t height) {
+    if (_gpuSwapchain) CCVKDevice::getInstance()->abortAcquiredSwapchain(_gpuSwapchain);
+    if (!_gpuSwapchain || (!_xr && (_gpuSwapchain->wsi.hasFatalError() || _gpuSwapchain->wsi.needsSurfaceRecreate()))) return false;
     uint32_t newWidth = width;
     uint32_t newHeight = height;
     uint32_t imageCount = 0;
@@ -301,16 +372,40 @@ bool CCVKSwapchain::checkSwapchainStatus(uint32_t width, uint32_t height) {
         const auto *gpuContext = CCVKDevice::getInstance()->gpuContext();
 
         VkSurfaceCapabilitiesKHR surfaceCapabilities;
-        VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(gpuContext->physicalDevice, _gpuSwapchain->vkSurface, &surfaceCapabilities));
+        const VkResult surfaceResult = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(gpuContext->physicalDevice, _gpuSwapchain->vkSurface, &surfaceCapabilities);
+        if (surfaceResult != VK_SUCCESS) {
+            _gpuSwapchain->wsi.onRecreateFailure(surfaceResult);
+            _gpuSwapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
+            CC_LOG_ERROR("Vulkan surface capability query failed: %d", surfaceResult);
+            return false;
+        }
 
         // surfaceCapabilities.currentExtent seems to remain the same
         // during any size/orientation change events on android devices
         // so we prefer the system input (oriented size) here
-        newWidth = width ? width : surfaceCapabilities.currentExtent.width;
-        newHeight = height ? height : surfaceCapabilities.currentExtent.height;
+        newWidth = width == UINT32_MAX ? _gpuSwapchain->wsi.surfaceWidth() : width;
+        newHeight = height == UINT32_MAX ? _gpuSwapchain->wsi.surfaceHeight() : height;
+        // A zero explicitly supplied by resize remains suspended until a
+        // non-zero resize/createSurface event arrives. A pending non-zero
+        // recreation may adopt a fixed extent advertised by the new surface.
+        if (newWidth && newHeight && surfaceCapabilities.currentExtent.width != UINT32_MAX) {
+            newWidth = surfaceCapabilities.currentExtent.width;
+            newHeight = surfaceCapabilities.currentExtent.height;
+        }
+        if (newWidth && newHeight && surfaceCapabilities.currentExtent.width == UINT32_MAX) {
+            newWidth = std::clamp(newWidth, surfaceCapabilities.minImageExtent.width, surfaceCapabilities.maxImageExtent.width);
+            newHeight = std::clamp(newHeight, surfaceCapabilities.minImageExtent.height, surfaceCapabilities.maxImageExtent.height);
+        }
+        _gpuSwapchain->wsi.setExtent(newWidth, newHeight);
+        if (newWidth == 0 || newHeight == 0) {
+            _gpuSwapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
+            _gpuSwapchain->lastPresentResult = VK_NOT_READY;
+            return false;
+        }
 
         if (_gpuSwapchain->createInfo.imageExtent.width == newWidth &&
-            _gpuSwapchain->createInfo.imageExtent.height == newHeight && _gpuSwapchain->lastPresentResult == VK_SUCCESS) {
+            _gpuSwapchain->createInfo.imageExtent.height == newHeight &&
+            !_gpuSwapchain->wsi.needsSwapchainRecreate() && _gpuSwapchain->wsi.canAcquire()) {
             return true;
         }
 
@@ -327,6 +422,15 @@ bool CCVKSwapchain::checkSwapchainStatus(uint32_t width, uint32_t height) {
             return false;
         }
 
+        const Format colorFmt = selectSurfaceConfig();
+        static_cast<CCVKTexture *>(_colorTexture.get())->_info.format = colorFmt;
+        static_cast<CCVKTexture *>(_colorTexture.get())->_viewInfo.format = colorFmt;
+        _gpuSwapchain->createInfo.imageExtent = {newWidth, newHeight};
+        _gpuSwapchain->createInfo.minImageCount = std::max(gpuDevice->backBufferCount, surfaceCapabilities.minImageCount);
+        if (surfaceCapabilities.maxImageCount) {
+            _gpuSwapchain->createInfo.minImageCount = std::min(_gpuSwapchain->createInfo.minImageCount, surfaceCapabilities.maxImageCount);
+        }
+        _gpuSwapchain->createInfo.preTransform = surfaceCapabilities.currentTransform;
         _gpuSwapchain->createInfo.surface = _gpuSwapchain->vkSurface;
         _gpuSwapchain->createInfo.oldSwapchain = _gpuSwapchain->vkSwapchain;
 
@@ -335,18 +439,53 @@ bool CCVKSwapchain::checkSwapchainStatus(uint32_t width, uint32_t height) {
         CCVKDevice::getInstance()->waitAllFences();
 
         VkSwapchainKHR vkSwapchain = VK_NULL_HANDLE;
-        VK_CHECK(vkCreateSwapchainKHR(gpuDevice->vkDevice, &_gpuSwapchain->createInfo, nullptr, &vkSwapchain));
+        const VkResult recreateResult = vkCreateSwapchainKHR(gpuDevice->vkDevice, &_gpuSwapchain->createInfo, nullptr, &vkSwapchain);
+        if (recreateResult != VK_SUCCESS) {
+            // The supplied oldSwapchain becomes retired even on failure. A
+            // recoverable retry must not pass that retired handle again.
+            if (recreateResult == VK_ERROR_OUT_OF_DATE_KHR || recreateResult == VK_ERROR_SURFACE_LOST_KHR ||
+                recreateResult == VK_NOT_READY || recreateResult == VK_TIMEOUT) {
+                _gpuSwapchain->surfaceOwner->retireGenerations();
+                destroySwapchain(gpuDevice);
+                _gpuSwapchain->createInfo.oldSwapchain = VK_NULL_HANDLE;
+            }
+            _gpuSwapchain->wsi.onRecreateFailure(recreateResult);
+            _gpuSwapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
+            CC_LOG_ERROR("Vulkan swapchain recreation failed: %d", recreateResult);
+            return false;
+        }
 
         destroySwapchain(gpuDevice);
 
         _gpuSwapchain->vkSwapchain = vkSwapchain;
+        _gpuSwapchain->imageGeneration = std::make_shared<CCVKGPUWSIGeneration>();
+        auto &generation = *_gpuSwapchain->imageGeneration;
+        generation.device = gpuDevice->vkDevice;
+        generation.swapchain = vkSwapchain;
+        generation.surface = _gpuSwapchain->surfaceOwner;
+        auto &generations = generation.surface->generations;
+        generations.erase(std::remove_if(generations.begin(), generations.end(), [](const auto &weak) { return weak.expired(); }), generations.end());
+        generation.surface->generations.push_back(_gpuSwapchain->imageGeneration);
 
         VK_CHECK(vkGetSwapchainImagesKHR(gpuDevice->vkDevice, _gpuSwapchain->vkSwapchain, &imageCount, nullptr));
         CCVKDevice::getInstance()->updateBackBufferCount(imageCount);
         _gpuSwapchain->swapchainImages.resize(imageCount);
         VK_CHECK(vkGetSwapchainImagesKHR(gpuDevice->vkDevice, _gpuSwapchain->vkSwapchain, &imageCount, _gpuSwapchain->swapchainImages.data()));
+        generation.renderFinished.resize(imageCount, VK_NULL_HANDLE);
+        generation.imageInitialized.resize(imageCount, false);
+        generation.imageAcquired.resize(imageCount, false);
+        generation.acquireSerials.resize(imageCount, 0);
+        VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        for (auto &semaphore : generation.renderFinished) VK_CHECK(vkCreateSemaphore(gpuDevice->vkDevice, &semaphoreInfo, nullptr, &semaphore));
+        if (gpuDevice->capabilities.swapchainMaintenance1.enabled) {
+            generation.presentFences.resize(imageCount, VK_NULL_HANDLE);
+            generation.presentPending.resize(imageCount, false);
+            VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            for (auto &fence : generation.presentFences) VK_CHECK(vkCreateFence(gpuDevice->vkDevice, &fenceInfo, nullptr, &fence));
+        }
     }
     ++_generation;
+    _gpuSwapchain->generation = _generation;
 
     // should skip size check, since the old swapchain has already been destroyed
     static_cast<CCVKTexture *>(_colorTexture.get())->_info.width = 1;
@@ -355,7 +494,7 @@ bool CCVKSwapchain::checkSwapchainStatus(uint32_t width, uint32_t height) {
     _depthStencilTexture->resize(newWidth, newHeight);
 
     bool hasStencil = GFX_FORMAT_INFOS[toNumber(_depthStencilTexture->getFormat())].hasStencil;
-    ccstd::vector<VkImageMemoryBarrier> barriers(imageCount * 2, VkImageMemoryBarrier{});
+    ccstd::vector<VkImageMemoryBarrier> barriers(imageCount, VkImageMemoryBarrier{});
     VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     ThsvsImageBarrier tempBarrier{};
@@ -369,24 +508,16 @@ bool CCVKSwapchain::checkSwapchainStatus(uint32_t width, uint32_t height) {
     auto *depthStencilGPUTexture = static_cast<CCVKTexture *>(_depthStencilTexture.get())->gpuTexture();
     for (uint32_t i = 0U; i < imageCount; i++) {
         tempBarrier.nextAccessCount = 1;
-        tempBarrier.pNextAccesses = getAccessType(AccessFlagBit::PRESENT);
-        tempBarrier.image = _gpuSwapchain->swapchainImages[i];
-        tempBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        thsvsGetVulkanImageMemoryBarrier(tempBarrier, &tempSrcStageMask, &tempDstStageMask, &barriers[i]);
-        srcStageMask |= tempSrcStageMask;
-        dstStageMask |= tempDstStageMask;
-
-        tempBarrier.nextAccessCount = 1;
         tempBarrier.pNextAccesses = getAccessType(AccessFlagBit::DEPTH_STENCIL_ATTACHMENT_WRITE);
         tempBarrier.image = depthStencilGPUTexture->swapchainVkImages[i];
         tempBarrier.subresourceRange.aspectMask = hasStencil ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
-        thsvsGetVulkanImageMemoryBarrier(tempBarrier, &tempSrcStageMask, &tempDstStageMask, &barriers[imageCount + i]);
+        thsvsGetVulkanImageMemoryBarrier(tempBarrier, &tempSrcStageMask, &tempDstStageMask, &barriers[i]);
         srcStageMask |= tempSrcStageMask;
         dstStageMask |= tempDstStageMask;
     }
     CCVKDevice::getInstance()->gpuTransportHub()->checkIn(
         [&](const CCVKGPUCommandBuffer *gpuCommandBuffer) {
-            vkCmdPipelineBarrier(gpuCommandBuffer->vkCommandBuffer, srcStageMask, dstStageMask, 0, 0, nullptr, 0, nullptr,
+            cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), gpuCommandBuffer->vkCommandBuffer, srcStageMask, dstStageMask, 0, 0, nullptr, 0, nullptr,
                                  utils::toUint(barriers.size()), barriers.data());
         },
         true); // submit immediately
@@ -395,6 +526,10 @@ bool CCVKSwapchain::checkSwapchainStatus(uint32_t width, uint32_t height) {
     depthStencilGPUTexture->currentAccessTypes.assign(1, THSVS_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ);
 
     _gpuSwapchain->lastPresentResult = VK_SUCCESS;
+    if (!_xr) {
+        _gpuSwapchain->wsi.onRecreated(imageCount);
+        _gpuSwapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
+    }
 
     // Android Game Frame Pacing:swappy
 #if CC_SWAPPY_ENABLED
@@ -422,17 +557,15 @@ bool CCVKSwapchain::checkSwapchainStatus(uint32_t width, uint32_t height) {
 
 void CCVKSwapchain::destroySwapchain(CCVKGPUDevice *gpuDevice) {
     if (_gpuSwapchain->vkSwapchain != VK_NULL_HANDLE) {
-        _gpuSwapchain->swapchainImages.clear();
-
+        CCVKDevice::getInstance()->waitAllFences();
+        if (!_gpuSwapchain->imageGeneration->retired) _gpuSwapchain->imageGeneration->waitForPresentCompletion();
 #if CC_SWAPPY_ENABLED
         SwappyVk_destroySwapchain(gpuDevice->vkDevice, _gpuSwapchain->vkSwapchain);
 #endif
-
-        vkDestroySwapchainKHR(gpuDevice->vkDevice, _gpuSwapchain->vkSwapchain, nullptr);
+        _gpuSwapchain->swapchainImages.clear();
+        _gpuSwapchain->imageGeneration.reset();
         _gpuSwapchain->vkSwapchain = VK_NULL_HANDLE;
-        // reset index only after device not ready
-        _gpuSwapchain->curImageIndex = 0;
-        gpuDevice->curBackBufferIndex = 0;
+        _gpuSwapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
     }
 }
 
@@ -441,11 +574,17 @@ void CCVKSwapchain::doDestroySurface() {
     auto *gpuDevice = CCVKDevice::getInstance()->gpuDevice();
     const auto *gpuContext = CCVKDevice::getInstance()->gpuContext();
 
+    CCVKDevice::getInstance()->abortAcquiredSwapchain(_gpuSwapchain);
+    _gpuSwapchain->wsi.setSurfaceAvailable(false);
+    _gpuSwapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
     CCVKDevice::getInstance()->waitAllFences();
+    _gpuSwapchain->surfaceOwner->retireGenerations();
     destroySwapchain(gpuDevice);
     _gpuSwapchain->lastPresentResult = VK_NOT_READY;
+    _gpuSwapchain->wsi.setSurfaceAvailable(false);
+    _gpuSwapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
 
-    vkDestroySurfaceKHR(gpuContext->vkInstance, _gpuSwapchain->vkSurface, nullptr);
+    _gpuSwapchain->surfaceOwner.reset();
     _gpuSwapchain->vkSurface = VK_NULL_HANDLE;
 }
 
@@ -457,7 +596,16 @@ void CCVKSwapchain::doCreateSurface(void *windowHandle) { // NOLINT
     auto viewSize = window->getViewSize();
     checkSwapchainStatus(viewSize.width, viewSize.height);
 #else
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+    RECT clientRect{};
+    if (GetClientRect(reinterpret_cast<HWND>(_windowHandle), &clientRect)) {
+        checkSwapchainStatus(clientRect.right - clientRect.left, clientRect.bottom - clientRect.top);
+    } else {
+        checkSwapchainStatus();
+    }
+#else
     checkSwapchainStatus();
+#endif
 #endif
 }
 
@@ -499,6 +647,10 @@ void CCVKSwapchain::createVkSurface() {
 #else
     #pragma error Platform not supported
 #endif
+    _gpuSwapchain->surfaceOwner = std::make_shared<CCVKGPUWSISurface>();
+    _gpuSwapchain->surfaceOwner->instance = gpuContext->vkInstance;
+    _gpuSwapchain->surfaceOwner->surface = _gpuSwapchain->vkSurface;
+    _gpuSwapchain->wsi.setSurfaceAvailable(_gpuSwapchain->vkSurface != VK_NULL_HANDLE);
 }
 
 } // namespace gfx

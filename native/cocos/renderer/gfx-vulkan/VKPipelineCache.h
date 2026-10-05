@@ -25,6 +25,7 @@
 #pragma once
 
 #include "VKGPUObjects.h"
+#include "VKPipelineCachePersistence.h"
 #include "base/Ptr.h"
 #include "base/RefCounted.h"
 #include "base/std/container/string.h"
@@ -33,23 +34,37 @@
 
 namespace cc::gfx {
 
+#ifndef CC_VULKAN_PIPELINE_CACHE
+    #define CC_VULKAN_PIPELINE_CACHE 0
+#endif
+
 class CCVKPipelineCache : public RefCounted {
 public:
     CCVKPipelineCache();
     ~CCVKPipelineCache() override;
 
-    void init(VkDevice dev);
+    // Internal backend API; an explicit path allows an isolated cache domain.
+    void init(VkDevice dev, const VkPhysicalDeviceProperties &properties,
+              bool persistent = CC_USE_PIPELINE_CACHE || CC_VULKAN_PIPELINE_CACHE,
+              const ccstd::string &path = {});
     void loadCache();
     void saveCache();
+    void checkpoint();
 
     void setDirty();
     VkPipelineCache getHandle() const;
+    bool isDirty() const { return _dirty; }
+    bool loadedFromDisk() const { return _loadedFromDisk; }
 
 private:
     VkDevice _device = VK_NULL_HANDLE;
     VkPipelineCache _pipelineCache = VK_NULL_HANDLE;
     ccstd::string _savePath;
     bool _dirty = false;
+    bool _persistent = false;
+    bool _loadedFromDisk = false;
+    VulkanPipelineCachePersistence::Identity _identity;
+    std::chrono::steady_clock::time_point _lastCheckpoint;
 };
 
 } // namespace cc::gfx

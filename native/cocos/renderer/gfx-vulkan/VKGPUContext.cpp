@@ -25,26 +25,28 @@
 #include "VKGPUObjects.h"
 #include "application/ApplicationManager.h"
 #include "platform/interfaces/modules/IXRInterface.h"
+#include <cstdlib>
 
 namespace cc {
 namespace gfx {
 
 namespace {
 
-constexpr uint32_t FORCE_MINOR_VERSION = 0; // 0 for default version, otherwise minorVersion = (FORCE_MINOR_VERSION - 1)
 
-#define FORCE_ENABLE_VALIDATION  0
-#define FORCE_DISABLE_VALIDATION 1
+#ifndef CC_VULKAN_VALIDATION
+    #define CC_VULKAN_VALIDATION (CC_DEBUG > 0)
+#endif
 
 using ccstd::vector;
 
-#if CC_DEBUG > 0 && !FORCE_DISABLE_VALIDATION || FORCE_ENABLE_VALIDATION
+#if CC_VULKAN_VALIDATION
 constexpr uint32_t DISABLE_VALIDATION_ASSERTIONS = 1; // 0 for default behavior, otherwise assertions will be disabled
 VKAPI_ATTR VkBool32 VKAPI_CALL debugUtilsMessengerCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
                                                            VkDebugUtilsMessageTypeFlagsEXT /*messageType*/,
                                                            const VkDebugUtilsMessengerCallbackDataEXT *callbackData,
-                                                           void * /*userData*/) {
+                                                           void *userData) {
     if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
+        static_cast<CCVKGPUContext *>(userData)->validationErrorCount.fetch_add(1, std::memory_order_relaxed);
         CC_LOG_ERROR("%s: %s", callbackData->pMessageIdName, callbackData->pMessage);
         CC_ASSERT(DISABLE_VALIDATION_ASSERTIONS);
         return VK_FALSE;
@@ -72,8 +74,9 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugReportCallback(VkDebugReportFlagsEXT flags,
                                                    int32_t /*messageCode*/,
                                                    const char *layerPrefix,
                                                    const char *message,
-                                                   void * /*userData*/) {
+                                                   void *userData) {
     if (flags & VK_DEBUG_REPORT_ERROR_BIT_EXT) {
+        static_cast<CCVKGPUContext *>(userData)->validationErrorCount.fetch_add(1, std::memory_order_relaxed);
         CC_LOG_ERROR("%s: %s", layerPrefix, message);
         CC_ASSERT(DISABLE_VALIDATION_ASSERTIONS);
         return VK_FALSE;
@@ -103,6 +106,8 @@ bool CCVKGPUContext::initialize() {
     };
     ccstd::vector<const char *> requestedExtensions{
         VK_KHR_SURFACE_EXTENSION_NAME,
+        VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME,
+        VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME,
     };
 
     ///////////////////// Instance Creation /////////////////////
@@ -111,20 +116,41 @@ bool CCVKGPUContext::initialize() {
         return false;
     }
 
-    uint32_t apiVersion = VK_API_VERSION_1_0;
-    if (vkEnumerateInstanceVersion) {
-        vkEnumerateInstanceVersion(&apiVersion);
-        if (FORCE_MINOR_VERSION) {
-            apiVersion = VK_MAKE_VERSION(1, FORCE_MINOR_VERSION - 1, 0);
-        }
+    uint32_t loaderVersion = VK_API_VERSION_1_0;
+    const VkResult versionResult = queryVulkanLoaderVersion(vkEnumerateInstanceVersion, &loaderVersion);
+    if (versionResult != VK_SUCCESS) {
+        CC_LOG_ERROR("Querying Vulkan loader version failed: %d", versionResult);
+        return false;
     }
+    apiVersionInfo.setLoaderVersion(loaderVersion);
+    if (loaderVersion < BACKEND_BASELINE_API_VERSION) {
+        CC_LOG_ERROR("Vulkan backend requires loader API >= 1.1, reported 0x%x", loaderVersion);
+        return false;
+    }
+#if CC_DEBUG > 0
+    // Development-only version cap for compatibility validation on modern GPUs.
+    if (const char *cap = std::getenv("CC_VULKAN_FORCE_API")) {
+        uint32_t capVersion = 0;
+        if (std::strcmp(cap, "1.1") == 0) capVersion = VK_API_VERSION_1_1;
+        if (std::strcmp(cap, "1.2") == 0) capVersion = VK_API_VERSION_1_2;
+        if (std::strcmp(cap, "1.3") == 0) capVersion = VK_API_VERSION_1_3;
+        if (!capVersion) {
+            CC_LOG_ERROR("Invalid CC_VULKAN_FORCE_API: %s (expected 1.1, 1.2, or 1.3)", cap);
+            return false;
+        }
+        apiVersionInfo.engineRequestedApiVersion = std::min(apiVersionInfo.engineRequestedApiVersion, capVersion);
+    }
+#endif
 
     IXRInterface *xr = CC_GET_XR_INTERFACE();
-    if (xr) apiVersion = xr->getXRVkApiVersion(apiVersion);
-    minorVersion = VK_VERSION_MINOR(apiVersion);
-    if (minorVersion < 1) {
-        requestedExtensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    apiVersionInfo.constrainInstanceVersion(xr ? xr->getXRVkApiVersion(apiVersionInfo.engineRequestedApiVersion)
+                                              : apiVersionInfo.engineRequestedApiVersion);
+    if (VK_API_VERSION_VARIANT(apiVersionInfo.instanceApiVersion) != 0 ||
+        apiVersionInfo.instanceApiVersion < BACKEND_BASELINE_API_VERSION) {
+        CC_LOG_ERROR("Vulkan backend requires instance/XR API >= 1.1, XR returned 0x%x", apiVersionInfo.xrConstrainedApiVersion);
+        return false;
     }
+    minorVersion = VK_VERSION_MINOR(apiVersionInfo.instanceApiVersion);
 
     uint32_t availableLayerCount;
     VK_CHECK(vkEnumerateInstanceLayerProperties(&availableLayerCount, nullptr));
@@ -144,10 +170,6 @@ bool CCVKGPUContext::initialize() {
     requestedExtensions.push_back(VK_NN_VI_SURFACE_EXTENSION_NAME);
 #elif defined(VK_USE_PLATFORM_MACOS_MVK)
     requestedExtensions.push_back(VK_MVK_MACOS_SURFACE_EXTENSION_NAME);
-    if (minorVersion >= 3) {
-        requestedExtensions.push_back("VK_KHR_portability_enumeration");
-        requestedExtensions.push_back("VK_KHR_portability_subset");
-    }
 #elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
     requestedExtensions.push_back(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
 #elif defined(VK_USE_PLATFORM_XCB_KHR)
@@ -156,7 +178,11 @@ bool CCVKGPUContext::initialize() {
     #pragma error Platform not supported
 #endif
 
-#if CC_DEBUG > 0 && !FORCE_DISABLE_VALIDATION || FORCE_ENABLE_VALIDATION
+    if (isExtensionSupported(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME, supportedExtensions)) {
+        requestedExtensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    }
+
+#if CC_VULKAN_VALIDATION
     // Determine the optimal validation layers to enable that are necessary for useful debugging
     ccstd::vector<ccstd::vector<const char *>> validationLayerPriorityList{
         // The preferred validation layer is "VK_LAYER_KHRONOS_validation"
@@ -194,11 +220,11 @@ bool CCVKGPUContext::initialize() {
 
 #if CC_DEBUG
     // Check if VK_EXT_debug_utils is supported, which supersedes VK_EXT_Debug_Report
-    bool debugUtils = false;
     if (isExtensionSupported(VK_EXT_DEBUG_UTILS_EXTENSION_NAME, supportedExtensions)) {
         debugUtils = true;
         requestedExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     } else {
+        debugReport = isExtensionSupported(VK_EXT_DEBUG_REPORT_EXTENSION_NAME, supportedExtensions);
         requestedExtensions.push_back(VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
     }
 #endif
@@ -215,16 +241,36 @@ bool CCVKGPUContext::initialize() {
         }
     }
 
-    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    app.pEngineName = "Cocos Creator";
-    app.apiVersion = apiVersion;
-
-    VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-#if defined(VK_USE_PLATFORM_MACOS_MVK)
-    if (minorVersion >= 3) {
-        instanceInfo.flags |= 0x01; // VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#if CC_VULKAN_VALIDATION
+    validationEnabled = !layers.empty();
+    bool validationFeaturesAvailable = false;
+    if (checkExtension(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME)) {
+        validationFeaturesAvailable = true;
+    } else if (isLayerSupported("VK_LAYER_KHRONOS_validation", supportedLayers) && validationEnabled) {
+        uint32_t count = 0;
+        VkResult result = vkEnumerateInstanceExtensionProperties("VK_LAYER_KHRONOS_validation", &count, nullptr);
+        if (result == VK_SUCCESS) {
+            ccstd::vector<VkExtensionProperties> layerExtensions(count);
+            result = vkEnumerateInstanceExtensionProperties("VK_LAYER_KHRONOS_validation", &count, layerExtensions.data());
+            if (result == VK_SUCCESS && isExtensionSupported(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME, layerExtensions)) {
+                extensions.push_back(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+                validationFeaturesAvailable = true;
+            }
+        }
+    }
+    if (!validationEnabled) {
+        CC_LOG_WARNING("Vulkan validation unavailable; development validation is not verified.");
     }
 #endif
+
+    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    app.pEngineName = "Cocos Creator";
+    app.apiVersion = apiVersionInfo.instanceApiVersion;
+
+    VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    if (checkExtension(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) {
+        instanceInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    }
 
     instanceInfo.pApplicationInfo = &app;
     instanceInfo.enabledExtensionCount = utils::toUint(extensions.size());
@@ -232,27 +278,44 @@ bool CCVKGPUContext::initialize() {
     instanceInfo.enabledLayerCount = utils::toUint(layers.size());
     instanceInfo.ppEnabledLayerNames = layers.data();
 
-#if CC_DEBUG > 0 && !FORCE_DISABLE_VALIDATION || FORCE_ENABLE_VALIDATION
+#if CC_VULKAN_VALIDATION
     VkDebugUtilsMessengerCreateInfoEXT debugUtilsCreateInfo{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
     VkDebugReportCallbackCreateInfoEXT debugReportCreateInfo{VK_STRUCTURE_TYPE_DEBUG_REPORT_CREATE_INFO_EXT};
-    if (debugUtils) {
+    if (validationEnabled && debugUtils) {
         debugUtilsCreateInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
                                                VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
                                                VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
                                                VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT;
         debugUtilsCreateInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
         debugUtilsCreateInfo.pfnUserCallback = debugUtilsMessengerCallback;
+        debugUtilsCreateInfo.pUserData = this;
 
         instanceInfo.pNext = &debugUtilsCreateInfo;
-    } else {
+    } else if (validationEnabled && debugReport) {
         debugReportCreateInfo.flags = VK_DEBUG_REPORT_ERROR_BIT_EXT |
                                       VK_DEBUG_REPORT_WARNING_BIT_EXT |
                                       VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT |
                                       VK_DEBUG_REPORT_INFORMATION_BIT_EXT |
                                       VK_DEBUG_REPORT_DEBUG_BIT_EXT;
         debugReportCreateInfo.pfnCallback = debugReportCallback;
+        debugReportCreateInfo.pUserData = this;
 
         instanceInfo.pNext = &debugReportCreateInfo;
+    }
+    const VkValidationFeatureEnableEXT enabledValidationFeatures[]{
+        VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT,
+        VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT,
+    };
+    VkValidationFeaturesEXT validationFeatures{VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT};
+    if (validationEnabled && validationFeaturesAvailable) {
+        validationFeatures.enabledValidationFeatureCount = utils::toUint(std::size(enabledValidationFeatures));
+        validationFeatures.pEnabledValidationFeatures = enabledValidationFeatures;
+        validationFeatures.pNext = instanceInfo.pNext;
+        instanceInfo.pNext = &validationFeatures;
+        synchronizationValidationEnabled = true;
+        bestPracticesValidationEnabled = true;
+    } else if (validationEnabled) {
+        CC_LOG_WARNING("VK_EXT_validation_features unavailable; synchronization/best-practices validation is not verified.");
     }
 #endif
 
@@ -262,20 +325,34 @@ bool CCVKGPUContext::initialize() {
         vkInstance = xr->createXRVulkanInstance(instanceInfo);
     } else {
         VkResult res = vkCreateInstance(&instanceInfo, nullptr, &vkInstance);
-        if (res == VK_ERROR_LAYER_NOT_PRESENT) {
-            CC_LOG_ERROR("Create Vulkan instance failed due to missing layers, aborting...");
+        if (res != VK_SUCCESS) {
+            CC_LOG_ERROR("Create Vulkan instance failed: %d", res);
             return false;
         }
     }
-    volkLoadInstanceOnly(vkInstance);
-
-#if CC_DEBUG > 0 && !FORCE_DISABLE_VALIDATION || FORCE_ENABLE_VALIDATION
-    if (debugUtils) {
-        VK_CHECK(vkCreateDebugUtilsMessengerEXT(vkInstance, &debugUtilsCreateInfo, nullptr, &vkDebugUtilsMessenger));
-    } else {
-        VK_CHECK(vkCreateDebugReportCallbackEXT(vkInstance, &debugReportCreateInfo, nullptr, &vkDebugReport));
+    if (vkInstance == VK_NULL_HANDLE) {
+        CC_LOG_ERROR("Vulkan instance creation returned a null handle.");
+        return false;
     }
-    validationEnabled = true;
+    volkLoadInstanceOnly(vkInstance);
+    if (!vkGetPhysicalDeviceFeatures2 || !vkGetPhysicalDeviceProperties2) {
+        CC_LOG_ERROR("Vulkan 1.1 physical-device query entries are missing.");
+        destroy();
+        return false;
+    }
+
+#if CC_VULKAN_VALIDATION
+    VkResult messengerResult = VK_SUCCESS;
+    if (validationEnabled && debugUtils && vkCreateDebugUtilsMessengerEXT) {
+        messengerResult = vkCreateDebugUtilsMessengerEXT(vkInstance, &debugUtilsCreateInfo, nullptr, &vkDebugUtilsMessenger);
+    } else if (validationEnabled && debugReport && vkCreateDebugReportCallbackEXT) {
+        messengerResult = vkCreateDebugReportCallbackEXT(vkInstance, &debugReportCreateInfo, nullptr, &vkDebugReport);
+    }
+    if (messengerResult != VK_SUCCESS) {
+        CC_LOG_ERROR("Vulkan validation messenger creation failed: %d", messengerResult);
+        destroy();
+        return false;
+    }
 #endif
 
     ///////////////////// Physical Device Selection /////////////////////
@@ -285,14 +362,27 @@ bool CCVKGPUContext::initialize() {
     VkResult res = vkEnumeratePhysicalDevices(vkInstance, &physicalDeviceCount, nullptr);
 
     if (res || physicalDeviceCount < 1) {
+        destroy();
         return false;
     }
 
-    ccstd::vector<VkPhysicalDevice> physicalDeviceHandles(physicalDeviceCount);
+    ccstd::vector<VkPhysicalDevice> physicalDeviceHandles;
     if (xr) {
-        physicalDeviceHandles[0] = xr->getXRVulkanGraphicsDevice();
+        // XR owns device selection; never inspect unfilled entries for other GPUs.
+        physicalDeviceCount = 1;
+        physicalDeviceHandles.push_back(xr->getXRVulkanGraphicsDevice());
+        if (physicalDeviceHandles[0] == VK_NULL_HANDLE) {
+            CC_LOG_ERROR("XR runtime returned a null Vulkan physical device.");
+            destroy();
+            return false;
+        }
     } else {
-        VK_CHECK(vkEnumeratePhysicalDevices(vkInstance, &physicalDeviceCount, physicalDeviceHandles.data()));
+        physicalDeviceHandles.resize(physicalDeviceCount);
+        res = vkEnumeratePhysicalDevices(vkInstance, &physicalDeviceCount, physicalDeviceHandles.data());
+        if (res != VK_SUCCESS || physicalDeviceCount == 0) {
+            destroy();
+            return false;
+        }
     }
 
     ccstd::vector<VkPhysicalDeviceProperties> physicalDevicePropertiesList(physicalDeviceCount);
@@ -305,35 +395,72 @@ bool CCVKGPUContext::initialize() {
 
     for (deviceIndex = 0U; deviceIndex < physicalDeviceCount; ++deviceIndex) {
         VkPhysicalDeviceProperties &properties = physicalDevicePropertiesList[deviceIndex];
-        if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+        if (properties.apiVersion >= BACKEND_BASELINE_API_VERSION && properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
             break;
         }
     }
 
     if (deviceIndex == physicalDeviceCount) {
-        deviceIndex = 0;
+        for (deviceIndex = 0; deviceIndex < physicalDeviceCount; ++deviceIndex) {
+            if (physicalDevicePropertiesList[deviceIndex].apiVersion >= BACKEND_BASELINE_API_VERSION) break;
+        }
+    }
+    if (deviceIndex == physicalDeviceCount) {
+        CC_LOG_ERROR("No Vulkan physical device meets the API 1.1 baseline.");
+        destroy();
+        return false;
     }
 
     physicalDevice = physicalDeviceHandles[deviceIndex];
     physicalDeviceProperties = physicalDevicePropertiesList[deviceIndex];
-    vkGetPhysicalDeviceFeatures(physicalDevice, &physicalDeviceFeatures);
 
-    majorVersion = VK_VERSION_MAJOR(physicalDeviceProperties.apiVersion);
-    minorVersion = VK_VERSION_MINOR(physicalDeviceProperties.apiVersion);
+    apiVersionInfo.setPhysicalDeviceVersion(physicalDeviceProperties.apiVersion);
+    majorVersion = VK_VERSION_MAJOR(apiVersionInfo.effectiveDeviceApiVersion);
+    minorVersion = VK_VERSION_MINOR(apiVersionInfo.effectiveDeviceApiVersion);
+    CC_LOG_INFO("Vulkan API: loader=%u.%u requested=%u.%u XR=%u.%u instance=%u.%u physical=%u.%u effective=%u.%u",
+                VK_VERSION_MAJOR(apiVersionInfo.loaderApiVersion), VK_VERSION_MINOR(apiVersionInfo.loaderApiVersion),
+                VK_VERSION_MAJOR(apiVersionInfo.engineRequestedApiVersion), VK_VERSION_MINOR(apiVersionInfo.engineRequestedApiVersion),
+                VK_VERSION_MAJOR(apiVersionInfo.xrConstrainedApiVersion), VK_VERSION_MINOR(apiVersionInfo.xrConstrainedApiVersion),
+                VK_VERSION_MAJOR(apiVersionInfo.instanceApiVersion), VK_VERSION_MINOR(apiVersionInfo.instanceApiVersion),
+                VK_VERSION_MAJOR(apiVersionInfo.physicalDeviceApiVersion), VK_VERSION_MINOR(apiVersionInfo.physicalDeviceApiVersion),
+                majorVersion, minorVersion);
 
-    if (minorVersion >= 1 || checkExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
-        physicalDeviceFeatures2.pNext = &physicalDeviceVulkan11Features;
-        physicalDeviceVulkan11Features.pNext = &physicalDeviceVulkan12Features;
-        physicalDeviceVulkan12Features.pNext = &physicalDeviceFragmentShadingRateFeatures;
-        physicalDeviceProperties2.pNext = &physicalDeviceDepthStencilResolveProperties;
-        if (minorVersion >= 1) {
-            vkGetPhysicalDeviceProperties2(physicalDevice, &physicalDeviceProperties2);
-            vkGetPhysicalDeviceFeatures2(physicalDevice, &physicalDeviceFeatures2);
-        } else {
-            vkGetPhysicalDeviceProperties2KHR(physicalDevice, &physicalDeviceProperties2);
-            vkGetPhysicalDeviceFeatures2KHR(physicalDevice, &physicalDeviceFeatures2);
-        }
+    uint32_t deviceExtensionCount = 0;
+    res = vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &deviceExtensionCount, nullptr);
+    if (res != VK_SUCCESS) {
+        destroy();
+        return false;
     }
+    ccstd::vector<VkExtensionProperties> deviceExtensions(deviceExtensionCount);
+    res = vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &deviceExtensionCount, deviceExtensions.data());
+    if (res != VK_SUCCESS) {
+        destroy();
+        return false;
+    }
+
+    capabilities.version = apiVersionInfo;
+    capabilities.debugUtils = debugUtils;
+    const auto available = getVulkanFeatureExtensionFlags([&deviceExtensions](const char *name) {
+        return isExtensionSupported(name, deviceExtensions);
+    });
+    if (!featureQuery.buildQuery(apiVersionInfo.effectiveDeviceApiVersion, available)) {
+        destroy();
+        return false;
+    }
+    vkGetPhysicalDeviceFeatures2(physicalDevice, featureQuery.head());
+    featureQuery.readSupported(capabilities);
+    physicalDeviceFeatures = featureQuery.features2()->features;
+
+    VulkanPropertyQueryChain propertyQuery;
+    propertyQuery.buildQuery(apiVersionInfo.effectiveDeviceApiVersion, available);
+    if (minorVersion >= 2 || isExtensionSupported(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME, deviceExtensions)) {
+        physicalDeviceDepthStencilResolveProperties.pNext = propertyQuery.chain()->pNext;
+        propertyQuery.chain()->pNext = &physicalDeviceDepthStencilResolveProperties;
+    }
+    vkGetPhysicalDeviceProperties2(physicalDevice, propertyQuery.chain());
+    propertyQuery.readSupported(capabilities);
+    // The property chain is local; retain only values, never its borrowed links.
+    physicalDeviceDepthStencilResolveProperties.pNext = nullptr;
 
     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &physicalDeviceMemoryProperties);
     uint32_t queueFamilyPropertiesCount = 0;
@@ -344,7 +471,7 @@ bool CCVKGPUContext::initialize() {
 }
 
 void CCVKGPUContext::destroy() {
-#if CC_DEBUG > 0 && !FORCE_DISABLE_VALIDATION || FORCE_ENABLE_VALIDATION
+#if CC_VULKAN_VALIDATION
     if (vkDebugUtilsMessenger != VK_NULL_HANDLE) {
         vkDestroyDebugUtilsMessengerEXT(vkInstance, vkDebugUtilsMessenger, nullptr);
         vkDebugUtilsMessenger = VK_NULL_HANDLE;

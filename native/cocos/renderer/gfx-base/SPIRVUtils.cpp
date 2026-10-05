@@ -26,10 +26,21 @@
 
 #include "base/Log.h"
 #include "base/Utils.h"
+#if !__has_include("glslang/Public/ResourceLimits.h")
+    #include "glslang/Include/Types.h"
+#endif
 #include "glslang/Public/ShaderLang.h"
 #include "glslang/SPIRV/GlslangToSpv.h"
-#include "glslang/StandAlone/ResourceLimits.h"
-#include "spirv/spirv.h"
+#if __has_include("glslang/Public/ResourceLimits.h")
+    #include "glslang/Public/ResourceLimits.h"
+#else
+    #include "glslang/StandAlone/ResourceLimits.h"
+#endif
+#if __has_include("spirv/unified1/spirv.h")
+    #include "spirv/unified1/spirv.h"
+#else
+    #include "spirv/spirv.h"
+#endif
 
 #define CC_GLSLANG_VERSION_GREATOR_OR_EQUAL_TO(major, minor, patch) \
     (((major) < GLSLANG_VERSION_MAJOR) || ((major) == GLSLANG_VERSION_MAJOR && \
@@ -119,11 +130,17 @@ void SPIRVUtils::initialize(int vulkanMinorVersion) {
 }
 
 void SPIRVUtils::destroy() {
+    // TProgram refers to its shaders; release it before shaders and process data.
+    _program.reset();
+    _shader.reset();
     glslang::FinalizeProcess();
     _output.clear();
 }
 
 void SPIRVUtils::compileGLSL(ShaderStageFlagBit type, const ccstd::string &source) {
+    _program.reset();
+    _shader.reset();
+    _output.clear();
     EShLanguage stage = getShaderStage(type);
     const char *string = source.c_str();
 
@@ -136,8 +153,14 @@ void SPIRVUtils::compileGLSL(ShaderStageFlagBit type, const ccstd::string &sourc
 
     auto messages = static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules);
 
-    if (!_shader->parse(&glslang::DefaultTBuiltInResource, _clientInputSemanticsVersion, false, messages)) {
+#if __has_include("glslang/Public/ResourceLimits.h")
+    const TBuiltInResource *resources = GetDefaultResources();
+#else
+    const TBuiltInResource *resources = &glslang::DefaultTBuiltInResource;
+#endif
+    if (!_shader->parse(resources, _clientInputSemanticsVersion, false, messages)) {
         CC_LOG_ERROR("GLSL Parsing Failed:\n%s\n%s", _shader->getInfoLog(), _shader->getInfoDebugLog());
+        return;
     }
 
     _program = std::make_unique<glslang::TProgram>();
@@ -145,6 +168,7 @@ void SPIRVUtils::compileGLSL(ShaderStageFlagBit type, const ccstd::string &sourc
 
     if (!_program->link(messages)) {
         CC_LOG_ERROR("GLSL Linking Failed:\n%s\n%s", _program->getInfoLog(), _program->getInfoDebugLog());
+        return;
     }
 
     _output.clear();
@@ -162,6 +186,9 @@ void SPIRVUtils::compileGLSL(ShaderStageFlagBit type, const ccstd::string &sourc
 }
 
 void SPIRVUtils::compressInputLocations(gfx::AttributeList &attributes) {
+    if (_output.size() < 5 || !_program) {
+        return;
+    }
     static ccstd::vector<Id> ids;
     static ccstd::vector<uint32_t> activeLocations;
     static ccstd::vector<uint32_t> newLocations;
@@ -214,7 +241,11 @@ void SPIRVUtils::compressInputLocations(gfx::AttributeList &attributes) {
     activeLocations.clear();
     int activeCount = _program->getNumPipeInputs();
     for (int i = 0; i < activeCount; ++i) {
+#if __has_include("glslang/Public/ResourceLimits.h")
+        activeLocations.push_back(_program->getPipeInput(i).layoutLocation());
+#else
         activeLocations.push_back(_program->getPipeInput(i).getType()->getQualifier().layoutLocation);
+#endif
     }
 
     uint32_t location = 0;
