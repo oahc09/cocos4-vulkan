@@ -3487,8 +3487,13 @@ if(MSVC)
 
     file(GLOB WINDOWS_DLLS
         ${CWD}/external/win64/libs/*.dll
-        ${CWD}/external/win64/libs/msvcr/*.dll
     )
+    # VC++/UCRT runtime DLLs must match the active toolchain: the legacy pinned
+    # external/win64/libs/msvcr copies (14.29) crash newer-MSVC builds at startup
+    # (std::mutex::lock in glslang::InitializeProcess).
+    include(${CWD}/external/win64/windows-runtime-libs.cmake)
+    cc_windows_collect_runtime_dlls(CC_WINDOWS_TOOLCHAIN_RUNTIME_DLLS)
+    list(APPEND WINDOWS_DLLS ${CC_WINDOWS_TOOLCHAIN_RUNTIME_DLLS})
     target_compile_options(${ENGINE_NAME} PUBLIC /MP
         /bigobj
         /wd4018 # signed/unsigned mismatch
