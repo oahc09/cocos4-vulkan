@@ -439,7 +439,18 @@ bool CCVKSwapchain::checkSwapchainStatus(uint32_t width, uint32_t height) {
         CCVKDevice::getInstance()->waitAllFences();
 
         VkSwapchainKHR vkSwapchain = VK_NULL_HANDLE;
-        const VkResult recreateResult = vkCreateSwapchainKHR(gpuDevice->vkDevice, &_gpuSwapchain->createInfo, nullptr, &vkSwapchain);
+        // Declare the one selected mode when maintenance1 is enabled. This
+        // does not enable dynamic mode switching or retain a stack pNext node
+        // in the persistent recreation template.
+        VkSwapchainCreateInfoKHR createInfo = _gpuSwapchain->createInfo;
+        VkSwapchainPresentModesCreateInfoEXT presentModes{VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_EXT};
+        if (gpuDevice->capabilities.swapchainMaintenance1.enabled) {
+            presentModes.pNext = createInfo.pNext;
+            presentModes.presentModeCount = 1;
+            presentModes.pPresentModes = &createInfo.presentMode;
+            createInfo.pNext = &presentModes;
+        }
+        const VkResult recreateResult = vkCreateSwapchainKHR(gpuDevice->vkDevice, &createInfo, nullptr, &vkSwapchain);
         if (recreateResult != VK_SUCCESS) {
             // The supplied oldSwapchain becomes retired even on failure. A
             // recoverable retry must not pass that retired handle again.

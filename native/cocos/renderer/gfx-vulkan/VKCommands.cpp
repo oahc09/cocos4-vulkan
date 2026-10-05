@@ -1497,24 +1497,44 @@ void cmdFuncCCVKCreateGeneralBarrier(CCVKDevice * /*device*/, CCVKGPUGeneralBarr
 }
 
 namespace {
+void bufferTransferBarrier(const CCVKGPUBuffer &gpuBuffer, VkDeviceSize offset, VkDeviceSize size,
+                           VkAccessFlags dstAccessMask, const CCVKGPUCommandBuffer *gpuCommandBuffer) {
+#if BARRIER_DEDUCTION_LEVEL >= BARRIER_DEDUCTION_LEVEL_BASIC
+    // transferAccess is cleared when upload->render visibility is published;
+    // it is not proof that an earlier copy no longer needs ordering. Cover
+    // prior copies and declared render accesses before reusing these bytes.
+    const ThsvsAccessType nextAccess = THSVS_ACCESS_TRANSFER_WRITE;
+    ThsvsGlobalBarrier accesses{};
+    accesses.prevAccessCount = utils::toUint(gpuBuffer.renderAccessTypes.size());
+    accesses.pPrevAccesses = gpuBuffer.renderAccessTypes.data();
+    accesses.nextAccessCount = 1;
+    accesses.pNextAccesses = &nextAccess;
+    VkPipelineStageFlags renderStages = 0;
+    VkPipelineStageFlags nextStages = 0;
+    VkMemoryBarrier renderBarrier{};
+    thsvsGetVulkanMemoryBarrier(accesses, &renderStages, &nextStages, &renderBarrier);
+    VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    barrier.srcAccessMask = renderBarrier.srcAccessMask | VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = dstAccessMask;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer = gpuBuffer.vkBuffer;
+    barrier.offset = offset;
+    barrier.size = size;
+    cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), gpuCommandBuffer->vkCommandBuffer,
+                       renderStages | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       0, 0, nullptr, 1, &barrier, 0, nullptr);
+#endif
+}
+
 void bufferUpload(const CCVKGPUBufferView &stagingBuffer, CCVKGPUBuffer &gpuBuffer, VkBufferCopy region, const CCVKGPUCommandBuffer *gpuCommandBuffer) {
     // Retain the staging VIEW (not just its gpuBuffer): the view carries the
     // staging block lease that keeps the block's bytes alive until retirement.
     gpuCommandBuffer->retain(const_cast<CCVKGPUBufferView *>(&stagingBuffer));
     gpuCommandBuffer->retain(&gpuBuffer);
     gpuCommandBuffer->recordBufferRange(&gpuBuffer, region.dstOffset, region.size);
-#if BARRIER_DEDUCTION_LEVEL >= BARRIER_DEDUCTION_LEVEL_BASIC
-    if (gpuBuffer.transferAccess) {
-        // guard against WAW hazard
-        VkMemoryBarrier vkBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        vkBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), gpuCommandBuffer->vkCommandBuffer,
-                           VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           0, 1, &vkBarrier, 0, nullptr, 0, nullptr);
-    }
-#endif
+    bufferTransferBarrier(gpuBuffer, region.dstOffset, region.size,
+                          VK_ACCESS_TRANSFER_WRITE_BIT, gpuCommandBuffer);
     vkCmdCopyBuffer(gpuCommandBuffer->vkCommandBuffer, stagingBuffer.gpuBuffer->vkBuffer, gpuBuffer.vkBuffer, 1, &region);
 };
 } // namespace
@@ -2078,6 +2098,11 @@ void CCVKGPUBufferHub::flush(CCVKGPUTransportHub *transportHub) {
                 region.size = buffer.second.size;
                 gpuCommandBuffer->recordBufferRange(buffer.first, region.srcOffset, region.size);
                 gpuCommandBuffer->recordBufferRange(buffer.first, region.dstOffset, region.size);
+                // The instance propagation reads and writes this same buffer.
+                // Publish prior writes to both copy accesses and order prior
+                // render reads before the destination instance is overwritten.
+                bufferTransferBarrier(*buffer.first, 0, VK_WHOLE_SIZE,
+                                      VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, gpuCommandBuffer);
                 vkCmdCopyBuffer(gpuCommandBuffer->vkCommandBuffer, buffer.first->vkBuffer, buffer.first->vkBuffer, 1, &region);
             }
         });

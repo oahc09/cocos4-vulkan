@@ -1,6 +1,14 @@
 # 真实 Windows 测试工程验证（2026-10-05更新）
 
-结论（2026-10-05最新补证）：**CRT、上传WAW、DS首用及本次RenderTexture布局错误已修复；指定真实工程Debug的legacy/Sync2均完成四场景页面与窗口回归，日志错误和泄漏均0、正常退出**。mask刮除效果尚未确认，BestPractices警告仍在；全场景、完整平台和性能验收尚未完成。修复前历史保留，M0~M7不因此验收。
+结论（2026-10-05最新调查）：**CRT、上传WAW、DS首用与RenderTexture修复的双路径有限证据保留；mask触摸失败现已定位为Canvas层与实际相机visibility不交**。真实工程legacy运行仅临时匹配层后，触摸/stroke及可见刮除出现，恢复原配置再入后重新无响应；未永久修改场景或renderer。BestPractices、工具级stencil内容、整体性能与平台验收仍待；本轮inspector诊断产生11条地址枚举ERROR，不宣称全部日志错误0。修复前历史保留，M0~M7不因此验收。
+
+## mask 输入与 stencil 单变量运行调查（2026-10-05，Lead）
+
+- 新报告 [VULKAN_MASK_INPUT_STENCIL_INVESTIGATION.md](VULKAN_MASK_INPUT_STENCIL_INVESTIGATION.md) 保存源码、实际camera、透明observer、原配置→临时层匹配→恢复再入证据及G1~G6边界。用户指定原Debug工程exe，本轮未重构建，未改测试场景/资源/renderer；实际exe SHA d6c5237a…870a1，不复用§2DY旧exe SHA冒称本轮构建。
+- 原Canvas33554432（UI_3D）与全部三实际camera visibility不交，hitTest 34次全false、touch/stroke为0。仅运行中改成524288（UI_2D），真实拖动hitTest 65次全true、touch start/move/end=1/30/1、stroke30；截图蓝遮罩中出现刮开区域。中心ROI原拖动差0、临时匹配差60108像素；恢复7个observer与原层后返回再入，原拖动差又为0。
+- Mask真实inverted/type/stage= true/2/6；native StencilManager和Batcher2d的状态链已读。有限视觉效果不等于GPU stencil bits读回或完整stencil正确，未抓RenderDoc/AGI。建议场景监听节点层匹配目标UIcamera；本轮只调查，不永久修复。
+- 原路径PID37696运行547.72s后WM_CLOSE exit0；actual timeline1/sync2=submit2=dynamic0、Validation layer加载、VUID-vk/SYNC-HAZARD/游戏JS Uncaught日志0、唯一泄漏0。所有11条ERROR均来自inspector地址枚举，不把它们隐去；BestPractices五族含load/store仍待。诊断CDP启动/首版control异常留档，失败05/06截图不作为有效对照；仅v2层控制为成功样本。
+- ignored根 `win-mask-investigation-lead/run-20261005-151510567737/retry/` 含完整raw log/CDP/PNG/恢复/summary。exe、场景和脚本前后SHA一致。本轮无Sync2/平台/性能重跑、不stage/commit。
 
 ## RenderTexture访问合同与首次采样修复（2026-10-05，Lead）
 
@@ -131,3 +139,17 @@
 | G4 Validation | 本次两当前源码运行ERROR0；原始日志证据，非全场景/平台Validation验收 |
 | G5 RenderDoc/AGI | 未验证：未抓帧；截图仅证明可见场景 |
 | G6 平台回归 | 修复后原部署启动/场景/正常退出通过；此前隔离缩放/恢复有限证据保留，完整平台/其它设备未验收 |
+
+## 2026-10-05 任务收口更新（Lead）
+
+- 原Windows工程Debug矩阵与buffer WAW红→绿完成；最终DS归属修复源码又在六配置（含1.1/1.2/Modern完整策略/forced fallback）exit0/error0/leak0。BestPractices三族修复、两族带合同边界保留。atlas/RT静态ROI阈值0/diff0，有限动画人工核对。Android当前源码251步编译链接0，非真机运行。
+- 正式状态与证据见 [VULKAN_COMPLETION_TASKS.md](VULKAN_COMPLETION_TASKS.md) / PROGRESS§2EA；本文旧段落保留对应历史时点。用户确认mask层问题排除，不继续输入修复；此前场景层改动不作为本轮Vulkan验收输入。
+- 当前有限工程证据不等于整计划完成；自然低版本/Android/Apple/XR、>3%性能与M4-B Gate仍待。
+
+- 当前G5有限GPU调查已完成：菜单同DS STORE/stencil0/1红→绿，Modern 2d3d/RT实际Submit2+Barrier2，所有draw PSO/RP与used descriptor核对；真实begin都是Classic fallback。RT24连续首用帧证明前帧内容消费，首次未写入像素没有可移植值保证，不靠本机RGBA0宣称零初始化。详见[VULKAN_REAL_PROJECT_GPU_CAPTURE.md](VULKAN_REAL_PROJECT_GPU_CAPTURE.md)。旧表“未抓帧”仅对应历史时点，不是当前状态。
+- 正在原工程新增两策略×六轮资源重建/resize/minimize/restore压力；首份helper缺move和240秒截止失败保留，均未冒称完整通过。正式T08终态以任务清单记录为准。
+
+### 最新有限资源压力终态（2026-10-05，Lead）
+
+- 当前源码legacy-v3/modern-v3六轮RT重建与窗口流程均完整exit0/judge PASS/Error-VUID-SYNC-JS0/leak0，12张cycle静态主体diff0；源/exe不变。证据为win-completion-t01-lead/run-20261005-164243788/window-resource-stress/terminal.json；旧helper/期限失败保留，不混用终态。
+- T08有限真实场景压力关闭；T05真实工程性能入口/正式采样尚未完成，M4-B前置与外部平台仍待，不能把本节当最终Vulkan完成声明。

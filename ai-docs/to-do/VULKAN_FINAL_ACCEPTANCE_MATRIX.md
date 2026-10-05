@@ -1,4 +1,16 @@
-# Vulkan 1.1→1.3 现代化最终验收矩阵（rev2，只读快照）
+# Vulkan 1.1→1.3 现代化最终验收矩阵
+
+## 当前整体验收结论（2026-10-05，Lead）
+
+**未通过。** 已按原计划 §23 核对全部 61 条 DoD，完整记录见 [整体验收报告](VULKAN_OVERALL_ACCEPTANCE_20261005.md)。当前五个修改源文件与真实 Windows Debug exe 的 SHA 与最新证据一致；只读重判六配置及两压力运行原始日志 8/8 满足各自有限判据，静态 ROI/stencil/窗口资源重建证据有效。以下历史矩阵保留原执行归属；当前状态以本节及 [任务清单](VULKAN_COMPLETION_TASKS.md) 为准。
+
+- 当前已测 Windows 功能范围通过，但 T05 真实工程性能、T09 cache/prewarm、T06 M4-A 前置、T07 M4-B、外部设备/平台与最终全特性 DoD 仍未齐。
+- 原“游戏场景 fallback/真实捕获待运行”已有有限补证：当前选定场景实际 Classic 回退，Barrier2/Submit2 和 stencil 内容已抓帧；不能当所有场景 Dynamic 执行通过。
+- Android 当前源影响构建/链接已完成（251 步），不是设备运行。§18 全特性/自然低版 GPU/项目支持的苹果-XR 运行仍需对应证据。
+- 两族 BestPractices advisory 已分类保留；RT 初始像素未定义合同不能靠本机首次读零保证。已知 mask 输入过滤问题排除。
+- 本次仅验收审查与记录，没有重复 GPU 运行或修改原计划通过标准；历史 ≥1000×5 和首用实验不撤销，也不替代用户指定真实工程的正式性能/冷暖合同。
+
+## 历史矩阵（rev2 快照，保留）
 
 日期：2026-10-04（Orca Worker）。rev2 按 Lead 复核修正章节映射（§8=M0、§9=M1、§10=M2、§11=M3、§12=M4）、PROGRESS 证据指针（实查 headings）、WSI/Dynamic 两证据族、First-compute-PSO 事实、平台/性能边界。状态词：代码已实现 / CPU 契约 / Windows 有限运行 / Android 编译链接 / 待运行 / 待实现 / 依赖外部条件。只读，无构建/测试。
 

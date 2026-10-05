@@ -271,8 +271,28 @@ void CCVKCommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *fbo
     VkRenderPassBeginInfo passBeginInfo{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     passBeginInfo.renderPass = _curGPURenderPass->vkRenderPass;
     passBeginInfo.framebuffer = framebuffer;
-    passBeginInfo.clearValueCount = utils::toUint(clearValues.size());
-    passBeginInfo.pClearValues = clearValues.data();
+    // Vulkan indexes clear values by attachment number. Keep the complete
+    // owned array for Dynamic rendering, but expose only the prefix required
+    // by Classic attachments using CLEAR (including stencil-only clears).
+    uint32_t clearValueCount = 0;
+    for (size_t i = 0; i < attachmentCount; ++i) {
+        if (_curGPURenderPass->colorAttachments[i].loadOp == LoadOp::CLEAR) {
+            clearValueCount = static_cast<uint32_t>(i + 1);
+        }
+    }
+    const auto requiresDepthStencilClear = [](const DepthStencilAttachment &attachment) {
+        const auto &formatInfo = GFX_FORMAT_INFOS[toNumber(attachment.format)];
+        return (formatInfo.hasDepth && attachment.depthLoadOp == LoadOp::CLEAR) ||
+               (formatInfo.hasStencil && attachment.stencilLoadOp == LoadOp::CLEAR);
+    };
+    if (requiresDepthStencilClear(_curGPURenderPass->depthStencilAttachment)) {
+        clearValueCount = static_cast<uint32_t>(attachmentCount + 1);
+    }
+    if (requiresDepthStencilClear(_curGPURenderPass->depthStencilResolveAttachment)) {
+        clearValueCount = static_cast<uint32_t>(attachmentCount + 2);
+    }
+    passBeginInfo.clearValueCount = clearValueCount;
+    passBeginInfo.pClearValues = clearValueCount ? clearValues.data() : nullptr;
     passBeginInfo.renderArea.offset = {safeArea.x, safeArea.y};
     passBeginInfo.renderArea.extent = {safeArea.width, safeArea.height};
 

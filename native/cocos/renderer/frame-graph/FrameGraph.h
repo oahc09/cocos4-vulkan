@@ -66,6 +66,12 @@ public:
     TypedHandle<ResourceType> create(const StringHandle &name, const DescriptorType &desc) noexcept;
     template <typename ResourceType>
     TypedHandle<ResourceType> importExternal(const StringHandle &name, ResourceType &resource) noexcept;
+    // Borrow a texture whose owner outlives graph execution; imported resources
+    // are never returned to the transient allocator and keep attachment stores.
+    TextureHandle importExternal(const StringHandle &name, gfx::Texture *texture) noexcept {
+        Texture resource(texture);
+        return importExternal(name, resource);
+    }
     void move(TextureHandle from, TextureHandle to, uint8_t mipmapLevel, uint8_t faceId, uint8_t arrayPosition) noexcept;
 
     inline ResourceNode &getResourceNode(const Handle handle) noexcept { return _resourceNodes[handle]; }

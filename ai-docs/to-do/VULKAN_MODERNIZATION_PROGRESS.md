@@ -3613,3 +3613,48 @@ SelfTest 未完成（合成 self-test 未实现，如实报 pending）。正常�
 - 独立读取2d3d/atlas与RenderTexture clamp-repeat、resize/restore/reentry画面。mask中心拖动无变化、无Touch回调日志，仅页面/无错误证据；输入layer不交为候选未证明，不能宣称stencil视觉PASS。BestPractices的UndefinedToReadOnly/access-layout/load-store/swapchain警告仍在，日志错误0非全部警告0。
 - 根 `win-scene-a-lead/run-20261005-124945523743/`：最终contract双案raw/actions/PNG/build日志、分析exit0与verification-summary、additional-evidence/source前后SHA。成功build后仅两个CR行尾字节移除，规范化源与build源一致，无代码token变化；不冒称该格式变更再次全编译。六源runtime前后完全一致。首次其它前台截图与启动黑屏不作场景完成证据，中间暂停流程如实保留，最终两案完整流程。
 - Windows报告新增本节详细实现/中间红/最终证据。未改测试工程源/资源/cache，未stage/commit；仍沿用录制期texture访问状态，无新逐subresource/pending tracker。未跑Android/RenderDoc/性能矩阵，不升级M0~M7整体验收；下一项mask输入与可观察stencil效果、更多真实场景及>3%性能/外部设备温控。
+
+### §2DZ mask 输入与 stencil 单变量运行调查（2026-10-05，Lead）
+
+- 用户要求下一步调查输入/stencil；执行渠道Lead，未委派新任务、未修改生产renderer/测试工程场景或资源。本轮用用户指定原Debug test-cases.exe，未构建；实际exe SHA d6c5237a…870a1与§2DY不同，exe/NewComponent.ts/mask.scene事前事后SHA一致，不冒称本轮重编或全部零ERROR。
+- 实际Canvas layer33554432与三actual camera visibility均不交；读取实际打包UITransform.hitTest源码确认过滤。原鼠标拖动hitTest 34次全false、touch0/stroke0；仅临时运行层改524288后同路径真实拖动65次全true、touch1/30/1、stroke30，蓝遮罩出现可见刮除。ROI差分别0/60108像素；恢复7个observer/原层后真实返回再入，原拖动再次差0。只改层的对照证明输入过滤因果，不是直接调用callback强行画图。
+- Mask实际type2/inverted=true/stage6；native StencilManager CLEAR_INVERTED/ENTER_LEVEL_INVERTED/ENABLED与Batcher2d状态链已读。有限可见效果非GPU stencil bits取证；G5 RenderDoc/AGI未验证，G6仅Windows legacy本次链，平台/性能/全stencil未验收。建议永久修复测试场景Canvas层或监听归属，不因输入过滤先动Vulkan stencil；调查范围未实施。
+- PID37696正常WM_CLOSE exit0，547.72s为诊断非性能；actual timeline1/sync2-submit2-dynamic0，Validation layer加载，日志VUID-vk/SYNC-HAZARD/游戏JS Uncaught0、唯一leak0。11条ERROR均为inspector地址枚举 `failed to get addresses Bad file descriptor`，输出源已定位但该错误根因未修；BestPractices五族含load/store仍在。首次端口/启动查询/脚本命名及第一版control CDP异常保留，05/06无效对照图片不作通过证据；v2才是有效层匹配。
+- 新报告 `VULKAN_MASK_INPUT_STENCIL_INVESTIGATION.md` 与Windows验证报告顶部更新；raw/JSON/PNG/恢复与独立分析exit0在ignored `win-mask-investigation-lead/run-20261005-151510567737/retry/`。未stage/commit、未新增同步/Validation开关、未重复Android/无关矩阵，不升级M0~M7。BestPractices后续单独调查，整体性能/外部平台条件仍待。
+
+## 2EA. 2026-10-05 目标任务表与真实 Windows 版本矩阵（Lead）
+
+- 用户目标全部完成已整理为 `VULKAN_COMPLETION_TASKS.md`，逐项记录状态与证据，不是最终验收公告。已知mask Canvas/camera visibility输入过滤由用户确认排除，不再修测试场景。工程验证使用用户指定test-project Debug test-cases。
+- T00计划/DoD核对完成。T01首个真实effective1.1/fence红：copy-buffer WAW；T01R仅补上传目标buffer range及bufferHub实例传播memory dependency，source已有render stages/access + TRANSFER→TRANSFER，不增加wait/submit/ALL_COMMANDS。旧exe与红日志保留。
+- 源码重编VKCommands并重链后，9独立配置（1.1/1.2/1.3、legacy/Sync2/Submit2、Dynamic opt-in/forced Classic/feature fallback、fence+Sync2）全exit0、ERROR/VUID/SYNC-HAZARD/JS0与唯一leak0。实际版本与runtime paths逐案核对；source-after-t01不变。9×3截图已读，atlas/RenderTexture各828000像素ROI对1.1基座8组diff0。2d3d动画不作静态golden。Dynamic政策ON时Forward FrameGraph auto-barrier使资格回退Classic，未宣称真实Dynamic draw。
+- T02已修Classic clearValueCount仅覆盖最高CLEAR索引、maintenance1本次swapchain创建声明selected present mode；真实重编/legacy+Sync2两流程exit0、错误/泄漏0、对应两族警告消失、上述两静态ROI仍diff0。剩layout/access及LOAD-after-DISCARD单独处理，未屏蔽。
+- RenderDoc1.44在D:/Program Files/RenderDoc发现；未安装/更新软件。原第一2d3d捕获63draw有效，但DS两pass均CLEAR，不代表load-store因果。菜单捕获同DS image先CLEAR/DONT_CARE后LOAD，有43stencil-enabled draw；mask原场景13draw全部stencil-off，不修输入、不宣称mask clipping通过。采集第三场景焦点guard安全停，前两份有效，第三未完成。一次控制台无条件打印“causal tuple verified”的判断撤销，菜单真实tuple才是依据。
+- DS跨相机归属修正已写入FrameGraph/ForwardStage：普通Vulkan兼容window DS导入，借用生命周期跨execute；imported既有规则STORE，不盲改全部附件。当前构建验证中；没有把代码写完当通过。证据统一root：native/build/vulkan-modernization/win-completion-t01-lead/run-20261005-164243788/（matrix-terminal/source清单、逐案debug-event raw/流程/PNG、GPU rdc/chunks）。本节执行渠道Lead，无本轮stage/commit/push。
+- Android当前adb设备虽列出，但shell要求登录，未认证/绕过且未获Vulkan能力；自然低版本设备、Apple/XR、性能>3%/真实游戏及M4-B前置仍待。不能改计划标准宣称全部完成。
+
+### §2EA 补记：T02 DS归属修复真实红→绿
+
+- ForwardStage普通Vulkan匹配目标导入RenderWindow DS；XR/AR编译排除，scaled/view/external/layered/非匹配保留原路径。FrameGraph新增借用gfx::Texture import入口，owner跨execute，imported不走transient释放且按既有store规则STORE。最终两次构建exit0，最后ForwardStage重编、engine/test-cases重链；exeSHA870bb4e9645835abfe89a715d5b6b7c935adcfd94a30b2ab96615f08075ecc05。
+- 原Debug工程legacy/Sync2-v2/1.1-fence/1.2/forced-fallback五案全pass（实际路径、flow、exit/error/leak/source不变），T02 StoreDontCareThenLoad0，另两advisory保留并规范分类；atlas/RenderTexture主体五×两图diff0/828000。旧hover菜单检查失败及一次脚本IndentationError保留，不冒称该案完成；v2才完整。
+- RenderDoc新菜单同image333/view336三RP的depth/stencil store皆STORE，第二LOAD由前STORE支撑，43stencil draw；共享store判据旧capture exit1/new exit0。30 PickPixel样本按官方1.44 VulkanReplay green*255核0→内部1/外0→Equal1保持→最后CLEAR0。新捕获v2 CAPTURED两rdc/exit0；第一轮确认超时失败保留。没有改变mask层，不把未修改mask的stencil-off当clipping通过。
+- T02关闭（含两族有依据的保留，不是warning0），T03进行中；T04首次RenderTexture有效内容/Dynamic实际命令及剩余DoD继续。Android当前源码编译进行中。全部本节执行渠道Lead；未stage/commit/push。
+
+### §2EB 真实GPU调查与selected四档收口（2026-10-05，Lead）
+
+- T03最终同exe870bb4e9…ecc05的六配置（含Modern完整策略）原工程全流程exit0/error0/leak0；atlas与RT静态主体ROI阈值0/diff0，有限动画人工检查。当前Android251步真实编译/链接exit0，非runtime。撤销上节T03进行中/Android进行中的当前状态，原时间点事实保留。
+- T04 Modern实抓2d3d 2pass/63draw/6Barrier2/1Submit2；RT5pass/22draw/12Barrier2/1Submit2；Dynamic实际begin0，与autoBarrier门控一致。draw实际PSO创建RP匹配，descriptor/布局/依赖JSON齐全。新菜单STORE/stencil红→绿有效。详细证据与失败采集见VULKAN_REAL_PROJECT_GPU_CAPTURE.md。
+- RT首次进入24连续帧回放complete=true；983首次采样先于相机输出、六点RGBA0，下一帧读前帧模型/灰底。未定义的初始像素不能被layout seed或本机读零升级为跨GPU初始化保证；现有API未定义初始颜色，按现有合同保留初始化/生产先于消费责任，不修改测试场景/全RT语义。这是有限调查关闭，不宣称复杂视觉/平台Gate全部完成。
+- 原工程资源/窗口压力T08正在执行；性能/cache、M4-A/M4-B前置及Android/Apple/XR仍未收口，VULKAN_COMPLETION_TASKS.md为当前任务状态唯一清单。未stage/commit/push。
+
+### §2EC 原工程资源/窗口压力与后续性能入口（2026-10-05，Lead）
+
+- 用户原test-cases Debug同exe870bb4e9…ecc05，legacy-v3/modern-v3各完整正常场景流程与六轮RT资源重建、12resize/6minimize-restore，native exit0、共享judge PASS、Error/VUID/SYNC/JS0/唯一leak0。12次静态主体ROI阈值0/diff0；源码与exe哈希不变。window-resource-stress/terminal.json为两case自身完整终态。
+- 原helper缺move与240秒采集期限两失败独立保留，不算完整通过；600秒第三版不改变六循环/判据，两正例均在期限内完整执行。没有强杀、自行改场景或关闭Validation。有限压力不当全平台pending lease/present完成证明。T08关闭。
+- T05开始调查真实工程采样入口，现有Profiler默认关闭且无逐帧CSV，当前pipeline cache编译OFF且无同名环境opt-in。补新逐帧/首次使用/冷暖合同与正式1000×5采样尚未完成，不用既有smoke/FPS/RenderDoc耗时冒充。M4-A性能前置、M4-B、Android真实低版本/Apple/XR及最终DoD仍未关闭；当前清单为VULKAN_COMPLETION_TASKS.md。未stage/commit/push。
+
+### §2ED 原计划61条DoD整体验收审查（2026-10-05，Lead）
+
+- 用户要求整体验收。本次核原计划M0~M7及§18~20/22/23，全部61条DoD逐条记录于VULKAN_OVERALL_ACCEPTANCE_20261005.md；结论未通过，不改原计划门槛，不把已完成有限任务数当总体百分比。
+- 当前五个修改生产文件及exe六SHA与window-resource-stress/terminal.json一致。只读重判ds-owned六配置及legacy-v3/modern-v3两压力原始配置/路径/流程/退出/log，8/8满足有限判据，ERROR/VUID/SYNC/JS0、唯一leak0，六轮压力和12静态ROI有效；没有新增GPU运行/构建。本次五生产文件diff --check exit0。现有Android251步当前源链接证据保留，非runtime。
+- Windows已测功能范围通过；当前actual Classic回退/Barrier2/Submit2/stencil内容已分清。全特性/可移植首帧内容不能仅由选定ROI/本机首次RT六点读零证明。已知mask层/输入问题排除；未验证FSR/secondary/XR保留Classic符合计划，GPL/扩展graphics manifest可选，不虚构为硬阻塞。
+- 尚需真实工程性能/首次使用/冷暖cache和>3%分析或接受结论、M4-A前置再M4-B、实际cache/prewarm合同与§18特性/自然低版/移动/项目支持苹果-XR证据。T05唯一进行中，T12审查完成但产品状态仍等待前置。最终矩阵新增当前结论，旧快照/Worker与Lead归属保留。仅新增/更新验收文档，未stage/commit/push。

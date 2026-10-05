@@ -240,7 +240,25 @@ void ForwardStage::render(scene::Camera *camera) {
             depthAttachmentInfo.loadOp = gfx::LoadOp::LOAD;
         }
 #endif
-        data.depth = builder.create(RenderPipeline::fgStrHandleOutDepthTexture, depthTexInfo);
+        auto *windowDepth = camera->getWindow()->getFramebuffer()->getDepthStencilTexture();
+        bool useWindowDepth = false;
+#if !CC_USE_XR && !CC_USE_AR_MODULE
+        if (_device->getGfxAPI() == gfx::API::VULKAN && shadingScale == 1.F && windowDepth && !windowDepth->isTextureView()) {
+            const auto &info = windowDepth->getInfo();
+            useWindowDepth = info.type == depthTexInfo.type && info.format == depthTexInfo.format &&
+                             info.width == depthTexInfo.width && info.height == depthTexInfo.height &&
+                             info.samples == gfx::SampleCount::X1 && info.layerCount == 1 && info.levelCount == 1 &&
+                             info.flags == gfx::TextureFlagBit::NONE && !info.externalRes &&
+                             hasFlag(info.usage, gfx::TextureUsageBit::DEPTH_STENCIL_ATTACHMENT);
+        }
+#endif
+        // Cameras execute separate graphs. A LOAD must refer to the window's
+        // persistent depth/stencil attachment, not a discarded pooled texture.
+        // Import it for compatible ordinary Vulkan targets; scaled, external,
+        // layered and other backends retain their existing transient path.
+        data.depth = useWindowDepth
+                         ? pipeline->getFrameGraph().importExternal(RenderPipeline::fgStrHandleOutDepthTexture, windowDepth)
+                         : builder.create(RenderPipeline::fgStrHandleOutDepthTexture, depthTexInfo);
         data.depth = builder.write(data.depth, depthAttachmentInfo);
         builder.writeToBlackboard(RenderPipeline::fgStrHandleOutDepthTexture, data.depth);
         builder.setViewport(pipeline->getViewport(camera), pipeline->getScissor(camera));
