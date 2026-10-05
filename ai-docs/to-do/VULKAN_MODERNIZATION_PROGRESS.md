@@ -3588,3 +3588,28 @@ SelfTest 未完成（合成 self-test 未实现，如实报 pending）。正常�
 - 按用户要求，**Orca Worker**将模块从 `native/cmake/windows-runtime-libs.cmake` 移至 `native/external/win64/windows-runtime-libs.cmake`，更新主 CMake include；函数行为和完整性检查不变，旧文件已移除。用户真实工程 Debug 两次构建均 exit0，日志/exit 位于 `win-crt-relocate-worker/20261004-relocate/`，不将构建当运行验收。
 - **Lead**复核原始 build exit、生成依赖的新位置与原 Debug CRT版本14.44.35211，原模块路径已不在生成依赖中。`external` 是已有独立 Git checkout，新模块在内层仓库显示为未跟踪；保留该仓库结构，撤回本轮不必要的外层两处 ignore 白名单改动。未删除嵌套Git、注册submodule、暂存或提交。
 - 本轮仅迁移及引用，无 renderer/运行库选择行为变化，无 GUI/GPU重跑；§2DU原路径运行证据保持历史有效，既有 Validation 与整体Gate状态不变。
+
+### §2DW 真实Windows工程纹理上传WAW最小修复（2026-10-05）
+
+- **Orca Worker实施**：`VKCommands.cpp/.h`新增默认0的extraDstAccessMask，上传前屏障补TRANSFER_WRITE；mipgen尾部显式TRANSFER→TRANSFER写可见性/availability，范围0..mipLevels-2，零范围守卫。未改THSVS、Validation/feature cache、renderer选择，未增加ALL_COMMANDS/waitIdle。中间仅mip尾修复的红log仍WAW10，补上传前目标访问后绿；其单个覆盖后的raw log不作为全部声称运行的证据，工具Actor遗留标签不改实际Worker执行归属。
+- **Lead审查/构建**：确认THSVS在srcAccess==0时省略dstAccess；依据布局转换发生于availability和visibility之间、转换写自动available但仍须后续visibility的规范语义，修正注释并保持TRANSFER覆盖copy/blit。当前真实 `cocos4-vulkan-test-project/build/windows/proj` Debug `test-cases` build0，VKCommands.cpp等重编、engine/exe重链，源码补丁diff-check0。
+- **Lead独立原路径运行**：新根 `win-upload-waw-lead/run-20261005-105350229036/`，legacy/sync2两独立进程日志实际paths分别sync2=0/1（timeline1、submit2/dynamic0）；两者exit0、无AV、WAW0/SYNC-HAZARD0、唯一泄漏0。真实点击并读取2d-rendering-in-3d截图；两者缩放，sync2最小化恢复后画面正常。legacy恢复调用前已自动关闭，不冒称该恢复成功。无JS uncaught。两者DS09600各4条（首次+缩放重建的depth/stencil），完整Validation仍FAIL。
+- 两运行同exeSHA `655bd0c21380ae498202a9d0fdacf03420569c2d1c17960a2ed11e12ce32d64b`；原始log/runtime/build/截图与独立analysis exit0/verification-summary留存。Windows报告补最新结论，修前WAW10记录不覆写。下一块DS首次/重建layout单独处理；本轮无Android/RenderDoc/全场景/性能Gate，不提升M0~M7整体验收，未stage/commit。
+
+### §2DX 混合屏幕FBO普通DS首用修复与真实工程红绿（2026-10-05）
+
+- **Orca Worker初稿与Lead复核**：Worker提出CB首次seed，但把错误归于swapchain访问状态并误报sync2。Lead源码确认swapchain DS使用swapchainVkImages、已创建期转换、vkImage为空；RP initialLayout来自RP barrier不是currentAccessTypes。初稿sync2 raw实际0，撤销该根因/路径声明；rev2脚本修正后真实sync2=1/有限ERROR0，窗口操作未完成。Worker自行checkout撤销自己swapchain hunk的流程越界如实披露，最终文件与里程碑一致。初稿行尾42行无关变动由Lead精确清理；不冒称为更早Lead改动。
+- **Lead收口实现**：实际链为swapchain color+普通非swapchain DS mixed FBO。VKGPUObjects新增RP actual depthStencilInitialLayout，VKCommands在创建attachment描述时快照含DISCARD处理；CB只在Classic、该mixed FBO、普通非外部DS、空访问状态、实际initialLayout==DS_ATTACHMENT_OPTIMAL时，使用view mip/layer与联合aspect发UNDEFINED→期望layout屏障，目标EARLY|LATE x DS_READ|WRITE。其余layout/Dynamic/swapchain DS不改，既有WAW修复保持；无waitIdle/ALL_COMMANDS/Validation-off。
+- **Lead独立对照**：旧CB无seed、原swapchain代码+WAW修复真实Debug build0/run0，09600×2/WAW0；最终当前源码真实工程Debug build0，相关CU重编+engine/exe重链。原目录legacy/sync2两新进程分别实际sync2=0/1，其它timeline1/submit2-dynamic0；两完整log ERROR0/09600-WAW-SYNC-HAZARD-JS0、无AV、唯一leak0、正常WM_CLOSE exit0。约97.5/93.7s非性能样本。
+- 两次真实2d-rendering-in-3d及900×650缩放/最小化恢复画面独立读取，回菜单再进入mask-graphics；仅确认mask页面与无错误，拖动截图无确认刮除效果，不声明stencil视觉正确。exeSHA同 `a17fab992de893492d7111e2e83b5cea377331f90898bf847c08fe656db3cbbc`；红不同SHA。根 `win-ds-fix-lead/run-20261005-113230226739/`保留三运行原log/exit/模块、红/绿build、sourceSHA/PNG、独立分析exit0/summary。首次准备脚本assert拒绝空白映射，未改源，失败目录保留；修正按内容核后才开始对照。
+- G1~G4本次链/有限场景与窗口流程得到验证，G5未抓帧、G6仅本机Windows有限证据；仍沿用录制期全texture访问状态，未新建全局/逐subresource layout tracker。无Android/全场景/性能Gate，不提升M0~M7整体。新Windows报告记录所有修正归属；未stage/commit，更多真实场景与>3%性能、外部设备/温控仍待。
+
+### §2DY 真实Windows RenderTexture访问合同/首次采样红绿（2026-10-05，Lead）
+
+- Worker WIN-SCENE-A报告2d3d双路径有限零错误，其atlas/mask/RenderTexture导航未完成；Lead在用户指定VS测试工程扩展真实场景，发现00900及colour/DS09600，不以既有2d3d绿例替代新链验收。修复、构建与本节运行执行渠道均为Lead。
+- `FrameGraph::move`将imported普通单层单mip可采样非storage colour输出的默认COLOR_WRITE双端元组改为fragment sampled双端；`GFXTexture::isSwapchainTexture()`排除swapchain，不能以usage=SAMPLED认定真实VkImage支持采样。view/外部特殊等不扩展。首用seed从广泛texture创建期方案收窄到autoBarrier开启且真实FBO/RP声明SHADER_READ_ONLY初始layout，既有early batch retain普通图像，先于所有用户CB。Classic autooffscreen DS初始seed配套扩展；上传WAW与其它DS合同保持。
+- 真实中间红全部留存：仅RP前restore不解决00900；usage-only方案误伤swapchain产生00897；per-RP seed仍在首次消费者报09600（13:52:42早于resize13:52:50，撤销resize根因判断）；CLEAR→UNDEFINED方案仅构建未运行并撤销；广泛colour seed有限绿后再次收窄。临时探针已删除。最终不新增waitIdle/ALL_COMMANDS/submit、不关Validation。
+- 指定 `build/windows/proj` 当前Debug `test-cases` build exit0，VKCommands.cpp重编、engine lib/exe重链。最终legacy/sync2两新进程均30动作、11截图、正常WM_CLOSE exit0，日志ERROR/00900/09600/WAW/HAZARD/JS全0、唯一leak0；实际timeline1/sync2=0或1/submit2-dynamic0，SDK Validation实际加载。同exeSHA `9a7b5c9dbf289f316aa2132e16a8fc313da44d7104b731fc6e78e9a89c9c0bc0`；192.6/286.1s为调试采集时间，非性能。
+- 独立读取2d3d/atlas与RenderTexture clamp-repeat、resize/restore/reentry画面。mask中心拖动无变化、无Touch回调日志，仅页面/无错误证据；输入layer不交为候选未证明，不能宣称stencil视觉PASS。BestPractices的UndefinedToReadOnly/access-layout/load-store/swapchain警告仍在，日志错误0非全部警告0。
+- 根 `win-scene-a-lead/run-20261005-124945523743/`：最终contract双案raw/actions/PNG/build日志、分析exit0与verification-summary、additional-evidence/source前后SHA。成功build后仅两个CR行尾字节移除，规范化源与build源一致，无代码token变化；不冒称该格式变更再次全编译。六源runtime前后完全一致。首次其它前台截图与启动黑屏不作场景完成证据，中间暂停流程如实保留，最终两案完整流程。
+- Windows报告新增本节详细实现/中间红/最终证据。未改测试工程源/资源/cache，未stage/commit；仍沿用录制期texture访问状态，无新逐subresource/pending tracker。未跑Android/RenderDoc/性能矩阵，不升级M0~M7整体验收；下一项mask输入与可观察stencil效果、更多真实场景及>3%性能/外部设备温控。

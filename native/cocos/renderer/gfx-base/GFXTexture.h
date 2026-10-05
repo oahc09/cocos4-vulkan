@@ -47,6 +47,7 @@ public:
     inline const TextureViewInfo &getViewInfo() const { return _viewInfo; }
 
     inline bool isTextureView() const { return _isTextureView; }
+    inline bool isSwapchainTexture() const { return _swapchain != nullptr; }
     inline uint32_t getSize() const { return _size; }
     inline ccstd::hash_t getHash() const { return _hash; }
 

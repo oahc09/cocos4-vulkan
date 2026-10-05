@@ -65,7 +65,8 @@ void cmdFuncCCVKDestroyPipelineState(CCVKGPUDevice *device, CCVKGPUPipelineState
 // command-buffer gate can reuse the exact same predicate.
 bool vkIsDynamicRenderPassCandidate(const CCVKGPURenderPass *gpuRenderPass);
 
-void cmdFuncCCVKImageMemoryBarrier(const CCVKGPUCommandBuffer *gpuCommandBuffer, const ThsvsImageBarrier &imageBarrier);
+void cmdFuncCCVKImageMemoryBarrier(const CCVKGPUCommandBuffer *gpuCommandBuffer, const ThsvsImageBarrier &imageBarrier,
+                                 VkAccessFlags extraDstAccessMask = 0);
 
 } // namespace gfx
 } // namespace cc

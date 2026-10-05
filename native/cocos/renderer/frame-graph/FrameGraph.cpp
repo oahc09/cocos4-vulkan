@@ -158,6 +158,13 @@ void FrameGraph::move(const TextureHandle from, const TextureHandle to, uint8_t 
     CC_ASSERT(!toResourceNode.writer);
 
     const gfx::TextureInfo &toTextureDesc = static_cast<ResourceEntry<Texture> *>(toResourceNode.virtualResource)->get().getDesc();
+    const auto *targetTexture = static_cast<ResourceEntry<Texture> *>(toResourceNode.virtualResource)->getDeviceResource();
+    const bool sampledRenderTexture = toResourceNode.virtualResource->isImported() && targetTexture && !targetTexture->isTextureView() &&
+                                      !targetTexture->getRaw()->isSwapchainTexture() &&
+                                      toTextureDesc.type == gfx::TextureType::TEX2D && toTextureDesc.layerCount == 1 && toTextureDesc.levelCount == 1 &&
+                                      toTextureDesc.flags == gfx::TextureFlagBit::NONE &&
+                                      hasFlag(toTextureDesc.usage, gfx::TextureUsageBit::SAMPLED) &&
+                                      !hasFlag(toTextureDesc.usage, gfx::TextureUsageBit::STORAGE);
     uint32_t const toTextureWidth = toTextureDesc.width >> mipmapLevel;
     uint32_t const toTextureHeight = toTextureDesc.height >> mipmapLevel;
     uint32_t const toTextureDepth = toTextureDesc.depth >> mipmapLevel;
@@ -181,6 +188,15 @@ void FrameGraph::move(const TextureHandle from, const TextureHandle to, uint8_t 
                 CC_ASSERT(attachmentTextureDesc.width >> attachment.level == toTextureWidth &&
                           attachmentTextureDesc.height >> attachment.level == toTextureHeight &&
                           attachmentTextureDesc.depth >> attachment.level == toTextureDepth);
+                // The ordinary RenderTexture output remains sampled outside
+                // this graph. Preserve explicit/custom contracts and swapchain
+                // targets, whose GFX usage bits do not prove image sampling support.
+                if (sampledRenderTexture && attachment.desc.usage == RenderTargetAttachment::Usage::COLOR &&
+                    attachment.desc.beginAccesses == gfx::AccessFlagBit::COLOR_ATTACHMENT_WRITE &&
+                    attachment.desc.endAccesses == gfx::AccessFlagBit::COLOR_ATTACHMENT_WRITE) {
+                    attachment.desc.beginAccesses = gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE;
+                    attachment.desc.endAccesses = gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE;
+                }
                 attachment.level = mipmapLevel;
                 attachment.layer = faceId;
                 attachment.index = arrayPosition;

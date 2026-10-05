@@ -422,6 +422,7 @@ void cmdFuncCCVKCreateRenderPass(CCVKDevice *device, CCVKGPURenderPass *gpuRende
     const bool hasStencil = GFX_FORMAT_INFOS[toNumber(gpuRenderPass->depthStencilAttachment.format)].hasStencil;
 
     attachmentDescriptions.assign(attachmentCount, {VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2});
+    gpuRenderPass->depthStencilInitialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     gpuRenderPass->clearValues.resize(attachmentCount);
     beginAccessInfos.resize(attachmentCount);
     endAccessInfos.resize(attachmentCount);
@@ -454,6 +455,7 @@ void cmdFuncCCVKCreateRenderPass(CCVKDevice *device, CCVKGPURenderPass *gpuRende
         attachmentDescriptions[depthIndex].stencilLoadOp = hasStencil ? mapVkLoadOp(attachment.stencilLoadOp) : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         attachmentDescriptions[depthIndex].stencilStoreOp = hasStencil ? mapVkStoreOp(attachment.stencilStoreOp) : VK_ATTACHMENT_STORE_OP_DONT_CARE;
         attachmentDescriptions[depthIndex].initialLayout = attachment.depthLoadOp == gfx::LoadOp::DISCARD ? VK_IMAGE_LAYOUT_UNDEFINED : initialLayout;
+        gpuRenderPass->depthStencilInitialLayout = attachmentDescriptions[depthIndex].initialLayout;
         attachmentDescriptions[depthIndex].finalLayout = finalLayout;
     }
     if (hasDepthResolve) {
@@ -834,6 +836,41 @@ void cmdFuncCCVKCreateRenderPass(CCVKDevice *device, CCVKGPURenderPass *gpuRende
 void cmdFuncCCVKCreateFramebuffer(CCVKDevice *device, CCVKGPUFramebuffer *gpuFramebuffer) {
     size_t colorViewCount = gpuFramebuffer->gpuColorViews.size();
     const auto *gpuRenderPass = gpuFramebuffer->gpuRenderPass.get();
+    // A sampled RenderTexture can be consumed before its first camera pass.
+    // Seed only the concrete RenderPass initial-layout contract, not every
+    // texture advertising SAMPLED. The existing early transport batch precedes
+    // all user command buffers and owns the referenced image until completion.
+    if (device->autoBarrierEnabled()) {
+        for (size_t index = 0; index < colorViewCount && index < gpuRenderPass->colorAttachments.size(); ++index) {
+            const auto *view = gpuFramebuffer->gpuColorViews[index].get();
+            const auto &attachment = gpuRenderPass->colorAttachments[index];
+            const auto *barrier = gpuRenderPass->getBarrier(index, device->gpuDevice());
+            if (!view || !view->gpuTexture || attachment.loadOp == LoadOp::DISCARD ||
+                barrier->prevAccesses.size() != 1 ||
+                barrier->prevAccesses[0] != THSVS_ACCESS_FRAGMENT_SHADER_READ_SAMPLED_IMAGE_OR_UNIFORM_TEXEL_BUFFER ||
+                getInitialFinalLayout(device, static_cast<CCVKGeneralBarrier *>(attachment.barrier), false).first != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) continue;
+            auto *texture = view->gpuTexture.get();
+            if (texture->swapchain || texture->externalVKImage || !texture->vkImage || !texture->currentAccessTypes.empty() ||
+                texture->type != TextureType::TEX2D || texture->aspectMask != VK_IMAGE_ASPECT_COLOR_BIT ||
+                texture->flags != TextureFlagBit::NONE || texture->samples != SampleCount::X1 ||
+                texture->mipLevels != 1 || texture->arrayLayers != 1 ||
+                view->baseLevel || view->levelCount != 1 || view->baseLayer || view->layerCount != 1 ||
+                !hasFlag(texture->usage, TextureUsageBit::SAMPLED) || hasFlag(texture->usage, TextureUsageBit::STORAGE)) continue;
+            device->gpuTransportHub()->checkIn([texture](CCVKGPUCommandBuffer *commandBuffer) {
+                commandBuffer->retain(texture);
+                const ThsvsAccessType sampled = THSVS_ACCESS_FRAGMENT_SHADER_READ_SAMPLED_IMAGE_OR_UNIFORM_TEXEL_BUFFER;
+                ThsvsImageBarrier seed{};
+                seed.nextAccessCount = 1;
+                seed.pNextAccesses = &sampled;
+                seed.prevLayout = seed.nextLayout = THSVS_IMAGE_LAYOUT_OPTIMAL;
+                seed.srcQueueFamilyIndex = seed.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                seed.image = texture->vkImage;
+                seed.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                cmdFuncCCVKImageMemoryBarrier(commandBuffer, seed, VK_ACCESS_SHADER_READ_BIT);
+                texture->currentAccessTypes = {sampled};
+            });
+        }
+    }
     const size_t hasDepthStencil = gpuRenderPass->depthStencilAttachment.format != Format::UNKNOWN ? 1 : 0;
     const size_t hasDepthResolve = gpuRenderPass->depthStencilResolveAttachment.format != Format::UNKNOWN ? 1 : 0;
     auto attachmentCount = static_cast<uint32_t>(colorViewCount + hasDepthStencil + hasDepthResolve);
@@ -1592,7 +1629,11 @@ void cmdFuncCCVKCopyBuffersToTexture(CCVKDevice *device, const uint8_t *const *b
     barrier.pNextAccesses = getAccessType(AccessFlagBit::TRANSFER_WRITE);
 
     if (gpuTexture->transferAccess != THSVS_ACCESS_TRANSFER_WRITE) {
-        cmdFuncCCVKImageMemoryBarrier(gpuCommandBuffer, barrier);
+        // The next scope writes the image (TRANSFER_WRITE copies) and this barrier
+        // may perform the layout transition into TRANSFER_DST. With no previous
+        // writes, THSVS omits dstAccessMask. Transition writes are automatically
+        // available, but still need visibility to the following transfer copies.
+        cmdFuncCCVKImageMemoryBarrier(gpuCommandBuffer, barrier, VK_ACCESS_TRANSFER_WRITE_BIT);
     } else {
         // guard against WAW hazard
         VkMemoryBarrier vkBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -1735,10 +1776,35 @@ void cmdFuncCCVKCopyBuffersToTexture(CCVKDevice *device, const uint8_t *const *b
 
             barrier.subresourceRange.baseMipLevel = 0;
             barrier.subresourceRange.levelCount = gpuTexture->mipLevels - 1;
-            barrier.pPrevAccesses = getAccessType(AccessFlagBit::TRANSFER_READ);
-            barrier.pNextAccesses = getAccessType(AccessFlagBit::TRANSFER_WRITE);
-
-            cmdFuncCCVKImageMemoryBarrier(gpuCommandBuffer, barrier);
+            if (barrier.subresourceRange.levelCount != 0) {
+                // ThsvsImageBarrier cannot express this transition: the blits above
+                // WROTE mip levels 1..mipLevels-2 inside the transitioned range while
+                // the last layout there is TRANSFER_SRC. Feeding THSVS_ACCESS_TRANSFER_READ
+                // (a read) makes thsvsGetVulkanImageMemoryBarrier take its WAR shortcut
+                // (srcAccessMask==0 -> dstAccessMask==0), so the layout transition's own
+                // writes need a dependency on both prior blit writes and future copies.
+                // Hand-roll the barrier as a full transfer->transfer memory dependency:
+                // (1) prior writes in range are made available (srcAccess=TRANSFER_WRITE),
+                // (2) the transition write is ordered after them,
+                // (3) subsequent upload copies observe it (dstAccess=TRANSFER_WRITE).
+                // TRANSFER stages cover preceding copy/blit writes and blit reads;
+                // srcAccess makes the writes available, dstAccess covers future copies.
+                // old layout TRANSFER_SRC (blit source), new layout TRANSFER_DST;
+                // full mip range 0..mipLevels-2, all layers, texture aspect mask.
+                VkImageMemoryBarrier mipTailBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                mipTailBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                mipTailBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                mipTailBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                mipTailBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                mipTailBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                mipTailBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                mipTailBarrier.image = gpuTexture->vkImage;
+                mipTailBarrier.subresourceRange = barrier.subresourceRange;
+                cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), gpuCommandBuffer->vkCommandBuffer,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   0, 0, nullptr, 0, nullptr, 1, &mipTailBarrier);
+            }
         } else {
             const char *formatName = GFX_FORMAT_INFOS[toNumber(gpuTexture->format)].name.c_str();
             CC_LOG_WARNING("cmdFuncCCVKCopyBuffersToTexture: generate mipmap for %s is not supported on this platform", formatName);
@@ -1862,7 +1928,8 @@ void cmdFuncCCVKDestroyPipelineState(CCVKGPUDevice *gpuDevice, CCVKGPUPipelineSt
     }
 }
 
-void cmdFuncCCVKImageMemoryBarrier(const CCVKGPUCommandBuffer *gpuCommandBuffer, const ThsvsImageBarrier &imageBarrier) {
+void cmdFuncCCVKImageMemoryBarrier(const CCVKGPUCommandBuffer *gpuCommandBuffer, const ThsvsImageBarrier &imageBarrier,
+                                 VkAccessFlags extraDstAccessMask) {
     VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     VkPipelineStageFlags tempSrcStageMask = 0;
@@ -1871,6 +1938,12 @@ void cmdFuncCCVKImageMemoryBarrier(const CCVKGPUCommandBuffer *gpuCommandBuffer,
     thsvsGetVulkanImageMemoryBarrier(imageBarrier, &tempSrcStageMask, &tempDstStageMask, &vkBarrier);
     srcStageMask |= tempSrcStageMask;
     dstStageMask |= tempDstStageMask;
+    // Layout transitions happen after availability and before visibility in this
+    // dependency (Vulkan spec: synchronization-image-layout-transitions). Their
+    // writes are automatically available, even when THSVS omits visibility for
+    // read-only/empty previous accesses. Callers can supply the access of the
+    // following operations; the destination stages must support these bits.
+    vkBarrier.dstAccessMask |= extraDstAccessMask;
     cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), gpuCommandBuffer->vkCommandBuffer, srcStageMask, dstStageMask, 0, 0, nullptr, 0, nullptr, 1, &vkBarrier);
 }
 

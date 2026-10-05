@@ -282,6 +282,28 @@ void CCVKCommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *fbo
                                                     ? &clearValues[attachmentCount] : nullptr,
                                                 secondaryCBCount);
     if (!_dynamicRenderPass) {
+        // An ordinary D/S image in a screen or automatically deduced offscreen
+        // framebuffer starts UNDEFINED. Swapchain D/S images are initialized
+        // at creation. Satisfy Classic's actual initialLayout on first use;
+        // manual offscreen barriers and custom layouts retain their contracts.
+        const auto *dsView = _curGPUFBO->gpuDepthStencilView.get();
+        if ((!_curGPUFBO->isOffscreen || device->autoBarrierEnabled()) && dsView && dsView->gpuTexture &&
+            _curGPURenderPass->depthStencilInitialLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+            const auto *texture = dsView->gpuTexture.get();
+            if (!texture->swapchain && !texture->externalVKImage && texture->vkImage && texture->currentAccessTypes.empty()) {
+                VkImageMemoryBarrier seed{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                seed.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                seed.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                seed.newLayout = _curGPURenderPass->depthStencilInitialLayout;
+                seed.srcQueueFamilyIndex = seed.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                seed.image = texture->vkImage;
+                seed.subresourceRange = {texture->aspectMask, dsView->baseLevel, dsView->levelCount, dsView->baseLayer, dsView->layerCount};
+                cmdPipelineBarrier(device->gpuDevice(), _gpuCommandBuffer->vkCommandBuffer,
+                                   VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                   0, 0, nullptr, 0, nullptr, 1, &seed);
+            }
+        }
         vkCmdBeginRenderPass(_gpuCommandBuffer->vkCommandBuffer, &passBeginInfo,
                              secondaryCBCount ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE);
     }

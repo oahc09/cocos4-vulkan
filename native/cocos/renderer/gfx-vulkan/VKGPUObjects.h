@@ -156,6 +156,9 @@ public:
 
     VkRenderPass vkRenderPass;
 
+    // Actual Classic D/S attachment initialLayout, including DISCARD handling.
+    VkImageLayout depthStencilInitialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
     // helper storage
     ccstd::vector<VkClearValue> clearValues;
     ccstd::vector<VkSampleCountFlagBits> sampleCounts; // per subpass
