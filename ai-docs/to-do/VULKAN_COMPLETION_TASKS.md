@@ -2,7 +2,7 @@
 
 目标：完成原 `Cocos_Vulkan_1.1_to_1.3_Modernization_Task_Plan.md` 的必需实现与 DoD，不把阶段性提交、有限 smoke 或编译成功等同最终完成。
 
-更新日期：2026-10-05。当前执行渠道：Lead。状态：已完成 / 进行中 / 待执行 / 等待前置 / 依赖外部条件 / 验证失败。
+更新日期：2026-10-06。当前执行渠道：Lead。状态：已完成 / 进行中 / 待执行 / 等待前置 / 依赖外部条件 / 验证失败。
 
 ## 执行约定
 
@@ -12,6 +12,7 @@
 - 每项完成须记录当前源码、命令/运行配置、实际路径、退出/错误、证据目录与限制。已有有效证据复用，失效或未覆盖部分才重跑。
 - 每次只保留一项“进行中”；发现具体红例先修复并回归，再完成该项。M4-B 必须等待 M4-A 的正确性/性能前置，不绕过。
 - 不自动 stage/commit/push；不关闭 Validation 或用 suppress 掩盖真实问题。外部设备不足如实保留，不能把目标全部完成标成 PASS。
+- 用户于2026-10-05指定顺序：先真实工程cache/prewarm与必需功能闭环，再正确性验证，随后正式性能验收；M4-B继续等待M4-A前置通过。
 
 ## 任务状态
 
@@ -23,14 +24,30 @@
 | T02 | 处理真实工程 BestPractices 警告 | 按 layout/access、load/store、WSI 分族；真实缺陷修复；无需修改项提供依据及边界，不仅屏蔽输出 | 已完成 | 三族修复实跑及菜单GPU红→绿；两族layout/access按规范分类保留，不宣称warning0；见VULKAN_BEST_PRACTICES_DISPOSITION.md，首次有效内容另列T04 |
 | T03 | 完成四档同场景图像对照 | Baseline1.1/Enhanced1.2/Modern1.3/forced fallback 同场景、同尺寸；golden/image diff及阈值；实际命中的 Classic/Dynamic 分开证明 | 已完成 | 当前源码四档+Sync2/Modern完整策略6配置；atlas/RenderTexture静态主体ROI阈值0全部相同，2d3d有限人工核查；真实Dynamic执行仍由T04分证，不把政策ON算draw |
 | T04 | 用 GPU 抓帧核对渲染内容与依赖 | RenderDoc/AGI 实际 pass/draw/PSO/descriptor/layout/load-store/resolve/stencil 内容证据；截图不替代抓帧 | 已完成 | 菜单STORE/stencil红→绿，Modern 2d3d/RT真实PSO-descriptor-Barrier2-Submit2与Classic回退已捕获；RT首次内容24帧回放完成，初始内容未定义合同如实保留，见VULKAN_REAL_PROJECT_GPU_CAPTURE.md |
-| T05 | 收口性能、冷暖 cache 与 >3% 调查 | 同设备同场景固定warmup，≥1000有效帧×≥5轮、P50/P95/P99；FirstPresent/FirstPSO/启动分开；回归有证据与接受理由 | 进行中 | 已调查实际工程测量入口：Profiler默认0且无逐帧CSV，现有smoke不替代；下一步补真实场景采样/冷暖cache合同，尚无新1000×5性能结果 |
+| T05 | 收口性能、冷暖 cache 与 >3% 调查 | 同设备同场景固定warmup，≥1000有效帧×≥5轮、P50/P95/P99；FirstPresent/FirstPSO/启动分开；回归有证据与接受理由 | 待执行 | 用户调整为功能、正确性先行；已调查Profiler默认0且无逐帧CSV，现有smoke不替代；T09后再补真实场景采样，尚无新1000×5性能结果 |
 | T06 | 判定 M4-A 语义迁移是否满足前置 | Validation/sync0、图像等价、submit拓扑不变、performance non-regression 的综合记录 | 等待前置 | T01~T05；>3% 是调查阈值而非自动失败，但不能没有原因/接受理由就放行 |
 | T07 | 实施 M4-B 同步范围优化 | 明确 producer/consumer、stage/access/layout；全局→资源屏障/宽→精确；真实工程等价回归与性能证据 | 等待前置 | T06 后才实施；completion signal ALL_COMMANDS 为生命周期语义，不列为缩窄目标 |
 | T08 | 完成真实场景 WSI/资源退休压力验证 | resize/minimize/restore/退出/反复场景切换，资源引用与退休完整；无提前复用、错误和泄漏 | 已完成 | 原Debug工程legacy/Modern两进程×6次RT重建、12resize、6minimize/restore各完整过；12静态ROI均diff0，错误/泄漏0，源码/exe不变；有限压力非全平台退休证明 |
-| T09 | 核对 cache/串行预热在真实工程的合同 | opt-in/default OFF、冷/暖数据关联、损坏/不匹配安全拒、创建/销毁正确；不声称driver命中减少create调用 | 待执行 | §2CD~CU 实验已完成，补真实工程接线与场景证据；可选graphics manifest不作为硬缺口 |
+| T09 | 核对 cache/串行预热在真实工程的合同 | opt-in/default OFF、冷/暖数据关联、损坏/不匹配安全拒、创建/销毁正确；不声称driver命中减少create调用 | 已完成 | 原Debug工程ON_START/既有渲染线程实际接线；17进程含冷暖、坏输入、wrong-key、checkpoint恢复、保存失败安全与参数拒绝；38判据夹具/24静态ROI；PROGRESS§2EE与模块README。有限功能合同，非性能Gate |
+| T13 | 补齐渲染特性与异常正确性覆盖 | 按§18逐族核对实际实现、实际命中路径、内容结果；版本/PFN/能力拒绝、销毁和恢复独立记录 | 进行中 | shadowMap默认纹理09600已最小修复，真实现代/Classic-fence、窗口恢复与RenderDoc有限内容通过；[证据](VULKAN_SHADOW_FALLBACK_VERIFICATION_20261005.md)。Instancing两实例draw与内容、正常退休也已有[有限证据](VULKAN_INSTANCING_VERIFICATION_20261005.md)；Indirect已有限通过；Bloom八pass阈值内容及Compute前提/dispatch→storage→fullscreen有限通过，见[本轮证据](VULKAN_BLOOM_COMPUTE_VERIFICATION_20261006.md)；滑条交互及其余族仍待，不以单项代全族 |
 | T10 | 完成 Android/真实低版本 GPU 验收 | 真机渲染/格式/恢复/生命周期/温控；自然1.1/1.2及KHR/fallback；编译链接不算设备运行 | 依赖外部条件 | 现有Android编译有效；当前adb列出7F72500010301388，但shell提示登录才能继续，尚无法核实API/ABI/Vulkan能力，需可用授权设备 |
 | T11 | 完成计划覆盖的苹果/XR 平台验证 | 对应依赖工件、构建、API约束/拒绝、生命周期与视觉证据；无设备不得宣称通过 | 依赖外部条件 | 需要对应平台/SDK/设备；不可仅凭Windows或Android链接替代 |
-| T12 | 最终逐条关闭 §23 DoD 与 M0~M7 | 每条必需项有实现/验证/证据；所有未完成项清零后才宣布全完成 | 等待前置 | 2026-10-05整体验收审查已执行，61/61逐条核对，结论未通过；见VULKAN_OVERALL_ACCEPTANCE_20261005.md。T05/T06/T07/T09及外部平台/特性证据仍未齐，不降低标准 |
+| T12 | 最终逐条关闭 §23 DoD 与 M0~M7 | 每条必需项有实现/验证/证据；所有未完成项清零后才宣布全完成 | 等待前置 | 2026-10-05整体验收审查已执行，61/61逐条核对，结论未通过；见VULKAN_OVERALL_ACCEPTANCE_20261005.md。T09有限功能合同已关闭；T13/T05/T06/T07及外部平台证据仍未齐，不降低标准 |
+
+## T13 逐项正确性清单
+
+仅记录各项有限完成边界，不将独立smoke或策略开关当真实工程内容通过。T13整体仍进行中。
+
+| 子项 | 真实工程任务 | 状态 | 已有证据 / 下一步 |
+|---|---|---|---|
+| T13-01 | Shadow Map默认纹理初始化与采样 | 已完成（有限） | 实际09600红→绿、现代/Classic-fence、窗口恢复、8个draw默认纹理白色读回及四张shadow output；CSM全族未含在此完成范围 |
+| T13-02a | GPU Instancing实例颜色 | 已完成（有限） | 原工程两实际Indexed draw=1024+976实例；2000条HSV颜色、652种输出匹配；现代/Classic-fence正常退出0/error0/leak0。详见[有限证据](VULKAN_INSTANCING_VERIFICATION_20261005.md)，再入/其他变体与平台不含在此范围 |
+| T13-02b | Indirect Draw真实工程内容 | 已完成（有限） | 原test-cases原生默认OFF入口；upload RAW红→绿；索引/非索引multi与loop、1.1/fence回退、2048字节完整golden及32/40字节命令一致；缺失第二draw真实负例/资源释放/RenderDoc通过。仅Classic实际执行，详见[Vulkan间接绘制证据](VULKAN_INDIRECT_DRAW_VERIFICATION_20261006.md) |
+| T13-03 | Compute场景管线与dispatch内容 | 已完成（有限） | 原test-cases默认OFF资源包入口、RaytracingWeekend真实注册；queue断言/storage descriptor/整块uniform三红→绿；100×150dispatch、32B实际参数、storage→fullscreen全字节一致、96000背景像素/球心golden；现代/Classic-fence正常退出。完整算法、非倍数resize/设备恢复待补，见[证据](VULKAN_BLOOM_COMPUTE_VERIFICATION_20261006.md) |
+| T13-04 | Bloom实际pass与阈值交互 | 内容有限通过，交互待验证 | 相同输入/相同八阶段shader、GPU threshold0.05/1.0、Kawase八pass/descriptor链、combine差1440000字节；真实滑条曾触发JS null-window红例，不把包参数对照当交互通过。见[证据](VULKAN_BLOOM_COMPUTE_VERIFICATION_20261006.md) |
+| T13-05 | Input Attachment / Multi Subpass | 待建立工程合同 | 生产已有refs/nextSubpass/描述符映射，先查真实场景或最小工程测试入口，后验证内容 |
+| T13-06 | MSAA / D-S Resolve / Secondary / FSR | 部分验证，待真实工程补齐 | 独立有限用例不替代真实工程；保持Classic资格回退并逐项查内容/拒绝 |
+| T13-07 | 版本/PFN/能力拒绝、资源销毁与恢复 | 部分验证 | 已有窗口资源压力及cache拒绝；按实际命中特性补齐异常，区别实现与验证 |
 
 ## 执行记录
 
@@ -108,3 +125,43 @@
 - 初版legacy helper不支持move，第二版legacy-v2在第四轮触及原采集器240秒WM_CLOSE上限，native正常退出0/错误0/leak0但缺剩余循环，不当压力PASS。第三版独立新目录将采集期限600秒，场景/循环数与判据不变，两完整终态才关闭T08。原失败日志保留。
 - 此压力验证是有限真实场景，不声称所有GPU pending lease/平台present完成/温控证明；已有独立寿命契约只补充，T10/T11/T12仍保留对应验收。
 - 进入T05。源码实读Profiler.h默认CC_USE_PROFILER0，Profiler类只有private聚合块与interval显示，没有现成逐帧导出；真实工程缓存CC_VULKAN_PIPELINE_CACHE=OFF，Device代码没有该名字的环境opt-in，不能凭设置env就声称冷暖持久cache测试。下一步需真实工程测量入口（默认OFF/显式opt-in），然后300warmup+1000有效帧×至少5轮、ON/OFF分开、冷暖关联/首次指标；不得使用RenderDoc时长或平均FPS授予Gate。尚未完成入口/正式采样与>3%收口，T05唯一进行中。
+
+### 2026-10-05：按用户优先级完成T09，开始T13正确性覆盖
+
+- 执行渠道Lead。实际test-cases接入default-off诊断模块：平台启动前拒绝坏参数，ON_START在业务PSO前配置持久化cache，两known compute recipes通过既有DeviceAgent线程串行创建。未改Vulkan生产核心/场景/资源；测试工程三处接线以native/tests/vulkan-real-project/real-project-integration.patch保留，不重复应用。
+- 当前源码Debug构建/重链exit0，exe SHA3859b142…cabc9940。初次缺private TBB导入导致链接红，补源文件__TBB_LIB_NAME后重编；首个旧窗口helper缺move的OFF采集未完成，不算通过，失败独立保留。
+- 17个终态进程：12完整场景预期正例/键拒绝、1保存失败安全负例、4初始化前参数拒绝。cold保存137391 payload字节，新restored实际driver输入137391字节；checksum/driver/vendor/device/UUID/truncation各安全拒绝并正常渲染。wrong-key实际创建合法PSO后Ready1/Failed1，正常场景退出为预期1；1.1/fence实际路径另测。
+- 正常enabled案实际预热GPU pipeline/module/layout销毁2/2、2/2、1/1；14业务graphics均消费同cache并完整销毁。Validation/Error/VUID/HAZARD/JS与设备泄漏0；默认OFF无额外hook/预热/诊断文件IO。共享判据38/38，24组atlas/RT主体ROI阈值0/diff0；源码/exe前后不变。
+- 活进程checkpoint快照118866 payload字节在新进程恢复；不冒称断电测试。保存失败案仅锁独立测试文件、失败atomic replace三次、旧SHA不变；native0/CLEAN与旧文件有效不代表本次保存成功，正例judge正确拒绝，安全性单独通过。
+- 根：native/build/vulkan-modernization/win-real-prewarm-lead/run-20261005-212151/，terminal.json为本项有限终态。模块README与必需功能状态表记录实现/证据/限制。当前共15任务：已完成8、进行中1（T13）、待执行1（T05）、等待前置3、依赖外部条件2；不是总体完成百分比。
+- T13仅开始源码合同调查，尚无新增Compute/Bloom GPU内容结论；当前Debug打包settings.rendering.customPipeline=false，Compute管线前提尚未满足，未改全局设置。Compute场景README要求custom-pipeline名RaytracingWeekend并加载注册脚本；现有addDispatch之后storage输出被fullscreen quad采样，需验证实际dispatch与内容，不能用本轮预热创建替代。Bloom settings启用、slider改threshold，需核实际pass与输出变化。性能随后T05，M4-B仍等T06。未暂存/提交/推送。
+
+
+### 2026-10-05：T13 Shadow Map 默认纹理有限闭环
+
+- 真实shadowMap采样2×2默认纹理UNDEFINED触09600，临时图像句柄探针匹配根因；最终只GlobalDescriptorSetManager.cpp加TRANSFER_DST并普通上传16字节白色内容，探针byte-exact移除。当前源Debug重编/重链exit0。
+- 现代timeline/Sync2/Submit2/Dynamic策略与Classic/fence强制1.1两独立原生进程正常退出、错误和泄漏0；两配置resize/minimize/restore、现代菜单返回再入均有截图。抓帧51实际draw，默认image唯一usage6、8次采样、16字节255；4张shadow output非恒定、producer早于consumer。实际阴影Classic资格回退保留。
+- 完整范围/原红、探针、两绿与抓帧失败记录见[Shadow有限报告](VULKAN_SHADOW_FALLBACK_VERIFICATION_20261005.md)、PROGRESS§2EF。T13状态仍进行中；先继续GPU Instancing实际draw/内容，再处理Compute/Bloom场景前提与内容，性能和M4-B顺序不变。没有Git提交。
+
+
+### 2026-10-05：T13-02a Instancing 有限内容验证完成
+
+- 全部Lead执行、原Debug当前exe6db8457a…acf7与输入源码不变，沿用上一块真实构建日志，未宣称本块重建。原modern/legacy关闭被15秒采集器强制结束，两案被judge明确拒绝；90秒独立重跑的modern-retirement/legacy-retirement自身退出0/error0/leak0，原失败不覆盖。
+- 现代重复案默认2000；Classic重复案2000→1000→3800+resize/minimize/restore后正常退出。现代增长/窗口恢复截图来自初案，其退休失败不当整流程通过；本块菜单返回再入未完成加载，不勾选。
+- RenderDoc实际两Indexed实例draw=1024/976，各36index/divisor1/stride80；2000条属性按同帧worldY重算HSV，容差1e-6/mismatch0；677属性颜色、652种匹配输出、27444像素。实际3 Classic pass/11 Barrier2/1 Submit2，Indirect=0。terminal.json有限Complete/Pass=true。
+- 旧T13-02细分为02a有限完成、02b待真实工程合同。T13整体仍唯一进行中，其他15主任务计数不变，T05性能/平台/M4-A→M4-B不放行。报告记录G1～G6范围和回放失败，未改生产/场景资源、未Git提交。
+
+### 2026-10-06：T13-02b Indirect Draw有限合同完成（Lead）
+
+- 真实Windows工程默认关闭诊断接线、7行生产屏障diff的Indirect/Index消费端修复；真实RAW红→绿、10个有限native终态、当前exe GPU回放、31 parser fixtures。矩阵各实际SHA分开，未把旧exe改记当前。
+- 多/循环两路径、索引/非索引、完整命令/图像、缺失draw负例、未知/互斥/真实空参数拒绝、非VMA直接退休与VMA最终泄漏0按证据分别记录。捕获实际Classic，未改autoBarrier gate。
+- 详见[有限报告](VULKAN_INDIRECT_DRAW_VERIFICATION_20261006.md)与PROGRESS§2EH。T13仍进行中，15主任务计数不变；下一批为Bloom实际pass/内容与Compute场景前提，T05/M4-A/M4-B顺序及外部平台条件不变。未暂存/提交。
+
+
+### 2026-10-06：Bloom 内容与 Compute 场景前提有限闭环
+
+- 全部由Lead执行。原工程默认legacy包不满足custom builder；新增默认OFF完整资源根选择器与隔离Creator构建入口，保留原Resources/项目rendering设置。Creator使用安装JS3.8.8与当前native，混合版本有限验证，不授予引擎兼容/平台Gate。
+- 三生产文件最小修复：Compute queue viewport非空合同、STORAGE_IMAGE descriptor保持GENERAL、显式setBuffer整块uniform优先绑定；断言/Validation/实际全零UBO内容红例均保留。当前源码重编重链0，同EXE15b99cd7…eca6的四正常进程全部exit0/error0/leak0，3最终RDC与EXE SHA关联。
+- Bloom实际八pass阈值对照，pre-Bloom输入1920000B完全相同，combine差1440000B；Compute实际32B参数、100×150dispatch/local8×4、1920000B storage到fullscreen垂直翻行全字节一致、96000背景像素/球心golden通过。共享内容判据含旧实际全零UBO等5负例exit0。实际render pass均Classic，现代政策ON不冒称Dynamic执行。
+- Bloom滑条的JS null-window红例保留为交互待验证，未处理已知mask层问题；不把输入错误0、shader创建或package preflight当内容证据。T13-03有限完成、T13-04内容有限通过/交互待验证；15主任务计数不变，T13仍唯一进行中。
+- 详细证据见VULKAN_BLOOM_COMPUTE_VERIFICATION_20261006.md、PROGRESS§2EI，raw=win-bloom-compute-t13-lead/run-20261006-092224859505。下一步建立Input Attachment/Multi Subpass真实工程合同；MSAA/D-S/Secondary/FSR/异常恢复、性能/M4-A→M4-B/外部平台继续各自等待，不升级整体验收。未stage/commit/push。

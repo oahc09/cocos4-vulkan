@@ -938,8 +938,10 @@ struct RenderGraphVisitor : boost::dfs_visitor<> {
             }
         }
 
+        // Compute queues have no enclosing raster-pass viewport; their own
+        // optional viewport is still pushed and popped symmetrically.
         // Revert viewport
-        CC_EXPECTS(ctx.viewportStack.size() > 1);
+        CC_EXPECTS(!ctx.viewportStack.empty());
         if (ctx.viewportStack.back()) {
             for (size_t i = ctx.viewportStack.size() - 1; i-- > 0;) {
                 const auto& vp = ctx.viewportStack[i];

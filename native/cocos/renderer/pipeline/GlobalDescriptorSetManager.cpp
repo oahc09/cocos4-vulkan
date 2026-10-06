@@ -59,10 +59,22 @@ void GlobalDSManager::activate(gfx::Device *device) {
     UBOSkinning::initLayout(maxJoints);
 
     _defaultTexture = _device->createTexture({gfx::TextureType::TEX2D,
-                                              gfx::TextureUsageBit::SAMPLED,
+                                              gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST,
                                               gfx::Format::RGBA8,
                                               2,
                                               2});
+
+    // Null bindings may be sampled before a shadow map exists. Publish a
+    // defined white fallback through the ordinary upload/sampling dependency
+    // path, rather than leaving its contents and initial layout undefined.
+    const uint8_t pixels[] = {
+        255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255,
+    };
+    const uint8_t *buffers[] = {pixels};
+    gfx::BufferTextureCopy region;
+    region.texExtent = {2, 2, 1};
+    _device->copyBuffersToTexture(buffers, _defaultTexture.get(), &region, 1);
 
     setDescriptorSetLayout();
     _descriptorSetLayout = device->createDescriptorSetLayout({globalDescriptorSetLayout.bindings});

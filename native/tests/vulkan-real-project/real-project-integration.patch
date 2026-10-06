@@ -1,0 +1,114 @@
+--- a/native/engine/win64/CMakeLists.txt
++++ b/native/engine/win64/CMakeLists.txt
+@@ -15,3 +15,20 @@
+     ${CC_ALL_SOURCES}
+ )
+ cc_windows_after_target(${EXECUTABLE_NAME})
++
++# Native diagnostics are inert unless their explicit opt-in environment is set.
++if(CC_USE_VULKAN)
++    target_sources(${EXECUTABLE_NAME} PRIVATE
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectPrewarm.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectIndirect.cpp)
++    target_include_directories(${EXECUTABLE_NAME} PRIVATE
++        ${COCOS_X_PATH}/tests/vulkan-real-project
++        ${COCOS_X_PATH}/cocos/renderer)
++    target_compile_definitions(${EXECUTABLE_NAME} PRIVATE
++        CC_VULKAN_REAL_PROJECT_DIAGNOSTICS=1)
++    # Match the backend's private TBB import name, including Debug builds.
++    set_source_files_properties(
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectPrewarm.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectIndirect.cpp
++        PROPERTIES COMPILE_DEFINITIONS "__TBB_LIB_NAME=tbb")
++endif()
+--- a/native/engine/win64/main.cpp
++++ b/native/engine/win64/main.cpp
+@@ -28,6 +28,19 @@
+ #include <windows.h>
+ 
+ #include "platform/BasePlatform.h"
++#if defined(CC_VULKAN_REAL_PROJECT_DIAGNOSTICS)
++#include "RealProjectPrewarm.h"
++#include "RealProjectIndirect.h"
++#include "RealProjectScenePackage.h"
++
++static int RunPlatformWithDiagnostics(int argc, const char **argv) {
++  if (!cc::vulkan_test::prepare() || !cc::vulkan_test::prepareIndirect() ||
++      !cc::vulkan_test::installScenePackage()) return 1;
++  auto *platform = cc::BasePlatform::getPlatform();
++  const int result = platform->init() ? -1 : platform->run(argc, argv);
++  return cc::vulkan_test::finishIndirect(cc::vulkan_test::finish(result));
++}
++#endif
+ 
+ #if defined(CC_SERVER_MODE)
+ 
+@@ -82,7 +95,11 @@
+     }
+   }
+ 
++#if defined(CC_VULKAN_REAL_PROJECT_DIAGNOSTICS)
++  const int result = RunPlatformWithDiagnostics(static_cast<int>(argv.size()), argv.data());
++#else
+   START_PLATFORM(static_cast<int>(argv.size()), argv.data());
++#endif
+ 
+   for (const char *arg : argv) {
+     free(const_cast<char *>(arg));
+@@ -92,11 +109,18 @@
+   if (!FreeConsole()) {
+     MessageBox(NULL, L"Failed to free the console!", NULL, MB_ICONEXCLAMATION);
+   }
++#if defined(CC_VULKAN_REAL_PROJECT_DIAGNOSTICS)
++  return result;
++#endif
+ }
+ #else
+ #include "SDL2/SDL_main.h"
+ 
+ int SDL_main(int argc, char **argv) {
++#if defined(CC_VULKAN_REAL_PROJECT_DIAGNOSTICS)
++  return RunPlatformWithDiagnostics(argc, (const char **)argv);
++#else
+   START_PLATFORM(argc, (const char **)argv);
++#endif
+ }
+ #endif
+--- a/native/engine/common/Classes/Game.cpp
++++ b/native/engine/common/Classes/Game.cpp
+@@ -24,6 +24,10 @@
+  THE SOFTWARE.
+  ****************************************************************************/
+ #include "Game.h"
++#if defined(CC_VULKAN_REAL_PROJECT_DIAGNOSTICS)
++#include "RealProjectPrewarm.h"
++#include "RealProjectIndirect.h"
++#endif
+ 
+ #ifndef GAME_NAME
+ #define GAME_NAME "CocosGame";
+@@ -52,8 +56,22 @@
+ 
+   _xxteaKey = SCRIPT_XXTEAKEY;
+ 
+-  BaseGame::init();
+-  return 0;
++#if defined(CC_VULKAN_REAL_PROJECT_DIAGNOSTICS)
++  if (!cc::vulkan_test::prepare() || !cc::vulkan_test::prepareIndirect()) return -1;
++  auto engine = getEngine();
++  auto prewarm = engine->on<cc::BaseEngine::EngineStatusChange>(
++      [](cc::BaseEngine *, cc::BaseEngine::EngineStatus status) {
++        if (status == cc::BaseEngine::ON_START) {
++          cc::vulkan_test::start();
++          cc::vulkan_test::startIndirect();
++        }
++      });
++  const int result = BaseGame::init();
++  engine->off(prewarm);
++  return result;
++#else
++  return BaseGame::init();
++#endif
+ }
+ 
+ void Game::onPause() { BaseGame::onPause(); }

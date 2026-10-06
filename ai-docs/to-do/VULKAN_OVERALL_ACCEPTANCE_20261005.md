@@ -4,6 +4,14 @@
 
 验收依据是原计划 §8~20、§22 和 §23 的 61 条 DoD，不降低标准，也不把阶段性提交或任务单中的有限调查完成等同全部通过。本次核对代码差异、原始日志、终态、源码/产物哈希和已有 GPU 内容证据；没有新增 GPU 运行、重建、平台测试或生产修复。历史 Orca Worker 的构建/运行归属仍按 PROGRESS 原记录保留。
 
+## 后续功能闭环更新（2026-10-05，Lead）
+
+- 以下1~6节保留先前61条整体验收审查的时间点、源码/HEAD/产物与归属，不当作本次新exe的重新全验收。当前主HEAD a947a4d0，Vulkan生产核心未因T09接线改变；新Debug exe3859b142…cabc9940由实际测试工程三处接线与新增default-off模块重新构建。
+- T09功能合同关闭：17终态进程，冷保存137391payload字节与新进程driver input真实关联；六类坏缓存安全拒绝、live checkpoint恢复、wrong-key/正常资源销毁、OFF/参数拒绝、保存失败安全分别取证。共享judge38/38、24静态ROI diff0；保存失败native0不能算保存成功，正例judge正确拒绝。见PROGRESS§2EE与[模块README](../../native/tests/vulkan-real-project/README.md)。
+- D54/D60等正式冷暖性能、FirstPresent/FirstPSO/启动测量与平台条件仍未全部满足，不能因为本次cold/restored功能通过就改为整体PASS。先补T13渲染/异常/销毁恢复正确性，再T05正式性能及>3%调查；T06放行后才T07 M4-B。
+- 当前15项任务：已完成8、进行中1（T13）、待执行1（T05）、等待前置3、依赖外部条件2。历史表格中T09/T05状态以[最新清单](VULKAN_COMPLETION_TASKS.md)为准；全特性/自然低版/移动/项目支持苹果-XR仍需证据，最终T12等待前置。
+- 新root为`native/build/vulkan-modernization/win-real-prewarm-lead/run-20261005-212151/`，本项源码/exe前后不变，所有实际运行Lead。本轮没有stage/commit/push，未以独立smoke替代真实项目。
+
 ## 1. 本次证据复核
 
 - 主工程：`E:/AIProMax/github/cocos4-vulkan-test-project/native/engine/win64`；VS 构建树 `E:/AIProMax/github/cocos4-vulkan-test-project/build/windows/proj`；Debug `test-cases`。
@@ -140,3 +148,12 @@
 | G6 平台回归 | Windows 已验证（有限窗口/资源）；Android 仅编译链接，真实低版/移动/苹果/XR 运行未验证 |
 
 相关记录：[任务清单](VULKAN_COMPLETION_TASKS.md)、[最终验收矩阵](VULKAN_FINAL_ACCEPTANCE_MATRIX.md)、[真实工程验证](VULKAN_WINDOWS_TEST_PROJECT_VERIFICATION.md)、[GPU 抓帧](VULKAN_REAL_PROJECT_GPU_CAPTURE.md)、[警告分类](VULKAN_BEST_PRACTICES_DISPOSITION.md)。本次不暂存、提交或推送。
+
+
+## 2026-10-05 T13-02a 有限补证，整体验收结论不变
+
+Lead使用原Windows测试工程完成实例颜色验证：2000实例真实Indexed draw及同帧HSV属性、652种输出匹配颜色，现代/Classic-fence正常退出/错误与泄漏0。详见[报告](VULKAN_INSTANCING_VERIFICATION_20261005.md)。这是已有Instancing实现的有限验证补证；Indirect实际0次、其他渲染特性与异常/平台/性能仍待验证，不能以本块关闭全§18或T12。15主任务总数与状态计数不变。
+
+## 2026-10-06 T13-02b 最新有限证据（Lead）
+
+原Windows测试工程的[Indirect Draw合同](VULKAN_INDIRECT_DRAW_VERIFICATION_20261006.md)有限通过：真实上传RAW红→绿；索引/非索引multi与loop、32/40字节实际命令和两2048字节golden；缺失draw负例、参数拒绝、退出/Validation/泄漏与当前exe RenderDoc。历史“Indirect实际0次/待工程入口”对应Instancing捕获时点，现已独立补证。实际Classic门控保留，非Dynamic/IndirectCount/平台/性能完成声明；T13与整体验收仍待，15主任务计数不变，下一批Bloom/Compute场景前提。

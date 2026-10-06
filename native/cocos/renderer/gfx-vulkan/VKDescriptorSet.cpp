@@ -197,6 +197,11 @@ void CCVKDescriptorSet::update() {
                         if (textureView) {
                             descriptorHub->connect(_gpuDescriptorSet, textureView, &descriptorInfo.image);
                             descriptorHub->update(textureView, &descriptorInfo.image, _textures[i].flags);
+                            // Access flags do not change the descriptor type. Even read-only
+                            // storage images require GENERAL (VUID-04152), not a sampled layout.
+                            if (hasFlag(binding.type, DescriptorType::STORAGE_IMAGE)) {
+                                descriptorInfo.image.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+                            }
                             layoutMgr->checkIn(textureView->gpuTexture, binding.accessTypes.data(), utils::toUint(binding.accessTypes.size()));
                         }
                     }

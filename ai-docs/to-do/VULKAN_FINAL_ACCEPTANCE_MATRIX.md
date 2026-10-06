@@ -1,6 +1,14 @@
 # Vulkan 1.1→1.3 现代化最终验收矩阵
 
-## 当前整体验收结论（2026-10-05，Lead）
+## 最新功能闭环更新（2026-10-06，Lead）
+
+**整体验收仍未通过；T09真实工程cache/串行prewarm有限功能合同已完成。** 原test-cases当前Debug重编/重链，17终态进程覆盖冷暖driver输入关联、六类坏缓存拒绝、checkpoint恢复、wrong-key/正常资源退休、默认OFF、参数拒绝及保存失败安全。共享judge38/38，24静态ROI diff0，见PROGRESS§2EE和[接线说明](../../native/tests/vulkan-real-project/README.md)。这是功能合同，不是正式冷暖性能、整个M7/平台Gate。
+
+T13已补Shadow默认纹理修复及[GPU Instancing有限内容](VULKAN_INSTANCING_VERIFICATION_20261005.md)：2000实例属性/652种输出颜色、现代与Classic-fence正常退出。Indirect已有[原工程有限内容合同](VULKAN_INDIRECT_DRAW_VERIFICATION_20261006.md)；其他特性仍待逐项证据，不更新整体验收为PASS。
+
+当前次序为T13正确性覆盖→T05正式性能→T06 M4-A前置→T07 M4-B。新增[必需功能与验证缺口](VULKAN_REQUIRED_FUNCTION_STATUS.md)区分已有实现、证据未齐与确实未实施；M4-B仍是等待前置的必需优化。历史61条审查与exe/运行归属保留，不将旧证据套到新exe。
+
+## 之前的整体验收审查（2026-10-05，Lead，历史快照）
 
 **未通过。** 已按原计划 §23 核对全部 61 条 DoD，完整记录见 [整体验收报告](VULKAN_OVERALL_ACCEPTANCE_20261005.md)。当前五个修改源文件与真实 Windows Debug exe 的 SHA 与最新证据一致；只读重判六配置及两压力运行原始日志 8/8 满足各自有限判据，静态 ROI/stencil/窗口资源重建证据有效。以下历史矩阵保留原执行归属；当前状态以本节及 [任务清单](VULKAN_COMPLETION_TASKS.md) 为准。
 
@@ -120,3 +128,7 @@
 4. 游戏场景视觉 capture（不等价 finite clear/smoke）。
 
 以上未完成前不宣布整计划完成。本文件只读，不构成验收结论。
+
+## 2026-10-06 T13-02b 最新有限证据（Lead）
+
+原Windows测试工程的[Indirect Draw合同](VULKAN_INDIRECT_DRAW_VERIFICATION_20261006.md)有限通过：真实上传RAW红→绿；索引/非索引multi与loop、32/40字节实际命令和两2048字节golden；缺失draw负例、参数拒绝、退出/Validation/泄漏与当前exe RenderDoc。历史“Indirect实际0次/待工程入口”对应Instancing捕获时点，现已独立补证。实际Classic门控保留，非Dynamic/IndirectCount/平台/性能完成声明；T13与整体验收仍待，15主任务计数不变，下一批Bloom/Compute场景前提。

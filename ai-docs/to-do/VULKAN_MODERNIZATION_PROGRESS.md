@@ -3658,3 +3658,55 @@ SelfTest 未完成（合成 self-test 未实现，如实报 pending）。正常�
 - 当前五个修改生产文件及exe六SHA与window-resource-stress/terminal.json一致。只读重判ds-owned六配置及legacy-v3/modern-v3两压力原始配置/路径/流程/退出/log，8/8满足有限判据，ERROR/VUID/SYNC/JS0、唯一leak0，六轮压力和12静态ROI有效；没有新增GPU运行/构建。本次五生产文件diff --check exit0。现有Android251步当前源链接证据保留，非runtime。
 - Windows已测功能范围通过；当前actual Classic回退/Barrier2/Submit2/stencil内容已分清。全特性/可移植首帧内容不能仅由选定ROI/本机首次RT六点读零证明。已知mask层/输入问题排除；未验证FSR/secondary/XR保留Classic符合计划，GPL/扩展graphics manifest可选，不虚构为硬阻塞。
 - 尚需真实工程性能/首次使用/冷暖cache和>3%分析或接受结论、M4-A前置再M4-B、实际cache/prewarm合同与§18特性/自然低版/移动/项目支持苹果-XR证据。T05唯一进行中，T12审查完成但产品状态仍等待前置。最终矩阵新增当前结论，旧快照/Worker与Lead归属保留。仅新增/更新验收文档，未stage/commit/push。
+
+### §2EE 真实工程cache/prewarm功能闭环与用户指定优先级（2026-10-05，Lead）
+
+- 用户要求功能→正确性→性能，M4-B等M4-A。T05改待执行，T09有限功能合同已完成，T13唯一进行中。原计划/生产核心/能力路由/Classic回退不改，不把本项关闭当61条DoD全通过。
+- 新native/tests/vulkan-real-project模块与共享judge；实际测试工程Game.cpp/main.cpp/win64 CMake三处接线。prepare在平台启动前解析环境，ON_START在脚本业务PSO前借既有DeviceAgent消息队列串行执行两known compute recipes。没有新增GPU wait/submit，默认OFF不安装hook/预热或写诊断cache。现有引擎内存driver cache未移除，graphics manifest/异步框架仍可选。
+- 指定Debug test-cases当前源重编/重链exit0；最终exe SHA3859b142cf0daba02ce8ee1d5c66106e3990e2080c8d8f0c6708efa6cabc9940。首build因私有TBB导入缺失LNK1104红，源文件定义__TBB_LIB_NAME=tbb后真实重编。最终LF integration patch反向--check exit0，仅检查未重新应用。初次窗口helper缺move采集不完整保留并排除，未用旧exe/旧flow当通过。
+- 全部运行归Lead：12完整场景案（OFF/cold/restored/六类坏缓存/wrong-key/1.1-fence/checkpoint-restored）满足自身合同；另1保存失败安全负例、4Vulkan初始化前参数拒绝，共17终态。真实cold payload137391 bytes→新restored driver input137391、memcmp validated payload；坏checksum/driver/vendor/device/UUID/truncation初始输入0但场景正常渲染。wrong-key实际合法PSO创建后Ready1/Failed1，正常运行/退休并预期exit1。
+- 正常enabled案hook先转发再取证，实际两compute key由driver root/捕获SPIRV与layout独立重建对manifest/production三方核；GPU pipeline/module/layout退休2/2、2/2、1/1。14业务graphics创建全部用配置cache且销毁14/14。live/device Validation/Error/VUID/HAZARD/JS0、唯一leak0；不声称compute dispatch/readback。两版本实际路径与配置关联。所有原菜单/2d3d/atlas/RT/resize/minrestore/再入流程守自有PID，不改资源/用户排除的mask。
+- 共享judge38/38 parser fixtures；12案×atlas/RT共24当前OFF静态ROI（828000pixels/阈值0）diff0。动画截图保留非同步golden。活进程before-close checkpoint独立校验checksum/identity并118866payload在新进程恢复，不冒称断电/崩溃恢复。
+- 保存失败仅在独立路径持有不共享DELETE文件句柄，atomic replace三次失败，旧SHA保持；正常场景/退休/native0，正例共享judge明确拒cache save/retrieval警告，不把旧有效文件/native CLEAN当本次保存成功。单列安全性负例通过。全部锁在finally关闭，未改ACL/用户文件。
+- raw根`native/build/vulkan-modernization/win-real-prewarm-lead/run-20261005-212151/`：terminal.json Complete/Pass只对应本项17进程有限终态，source-before/after完全相同、exe一致，judgeSHA与判据关联；build3、checkpoint快照、坏输入、原始log/flow/action/PNG、参数与保存失败均保留。模块README完整复现/边界，未stage/commit/push、未重复Android/独立ctest/无关性能矩阵。
+- T13开始读真实Compute/Bloom合同：RaytracingWeekend自定义管线须注册/启用，dispatch storage→fullscreen consumer需GPU证明；Bloom启用且slider调整threshold，待实际pass/内容验证。其余全特性/异常/恢复需逐族补证；T05正式采样/冷暖性能/>3%、T06/T07、自然低版/移动/苹果-XR仍未关闭。新VULKAN_REQUIRED_FUNCTION_STATUS.md区分未实施与未验证。
+
+
+### §2EF T13 ShadowMap 默认采样纹理最小根因修复（2026-10-05，Lead）
+
+- 本块全部由Lead执行；未派Orca Worker/native subagent。真实测试工程的现代ShadowMap红例09600（native exit0/errors20）保留；临时创建日志匹配image0x1aa00000001aa为GlobalDS默认2×2 RGBA8 SAMPLED，没有上传。原先有shader/阴影画面不等于Validation合法。
+- 唯一生产文件GlobalDescriptorSetManager.cpp +13/-1：TRANSFER_DST+四白texel普通copyBuffersToTexture；原上传依赖/retain/staging lease保持，没有额外submit/wait。VKCommands临时probe从字节备份精确还原。Debug当前源重编/重链0，最终exe6db8457a3187863a3f1531f609891c0246538ccc0a79c2ee1004e427fe9dacf7。
+- fixed-modern与fixed-legacy实际paths分别1/1/1/1/0、0/0/0/0/1，effective1.3/1.1，均Validation层启用、正常WM_CLOSE退出0/ERROR0/09600=0/SYNC0/JS0/leak0；resize/minimize/restore均执行留截图，现代菜单返回再入。强制1.1不是自然低版平台证明。
+- G5真实RenderDoc原exe：51 draw、10 BeginRenderPass、0 BeginRendering、51 Barrier2、1 Submit2。唯一2×2 VkFormat37/usage6 ResourceId::651被8个draw采样，完整16byte=255；四512² R32_FLOAT shadow targets producer早于consumer且非恒定。Classic不放宽门控；shader输出不是空纹理。完整G1–G6与所有取证脚本失败记录见VULKAN_SHADOW_FALLBACK_VERIFICATION_20261005.md。
+- raw根win-render-features-t13-lead/run-20261005-222623337071；shadow-terminal.json有限Complete/Pass=true/source一致/probe去除。其余T13族、BestPractices/性能/平台与M4-A→M4-B等待状态不变；T09原17例不冒称对本块新exe已全部重跑。没有新增Android运行/Git提交。
+
+
+### §2EG T13-02a 原工程 GPU Instancing 属性/像素有限验证（2026-10-05，Lead）
+
+- 无委派，本块未新增生产代码/改场景；沿用§2EF真实Debug构建exe6db8457a3187863a3f1531f609891c0246538ccc0a79c2ee1004e427fe9dacf7，源/六场景输入/产物SHA前后一致。真实menu+RichEdit过滤和实际instanced-color画面后取证，不把提示蓝色或场景名作合同。
+- 默认2000模型：RenderDoc两vkCmdDrawIndexed event34/38，36indices×1024/976 instances，per-instance divisor1/stride80/color float4 offset64/worldY offset28。2000条实际GPU属性按场景HSV+Color量化验证，mismatch0/maxerror2.9685450542160652e-08（tol1e-6）。800×600 BGRA8实际输出27444像素匹配652种颜色；不是只看调用计数/截图。
+- 捕获3 BeginRenderPass、0 BeginRendering、11 Barrier2、1Submit2、0Indirect；Classic资格回退不改。现代实际paths1/1/1/1/0、Classic/fence强制1.1 paths0/0/0/0/1；两90秒关闭等待重复案正常native0、Validation/Error/VUID/HAZARD/JS0、唯一leak0。Classic重复案有2000→1000→3800与窗口恢复，现代正常退出重复案默认2000。
+- 首次modern/legacy15秒关闭被采集器强制终止（60929、无leak0）保留且judge拒绝；错误0不能当退休PASS。现代增长/resize截图来自这次未完整退休案，只作为分项内容证据。菜单返回再入未完成，不扩大T08 RT合同。初始回放脚本无JSON、停止自有qrenderdoc后用显式root修正并成功，保留旧脚本/非零退出、不推断未捕获异常类型。
+- raw=win-instancing-t13-lead/run-20261005-231927836181；terminal.json Complete/Pass=true，完整报告VULKAN_INSTANCING_VERIFICATION_20261005.md。T13-02a有限关闭；02b间接绘制已有生产分支但需真实工程入口，其他特性/性能/M4-A→M4-B/平台状态不变。不stage/commit/push，不拿强制1.1代自然低版、帧回放代性能/全平台。
+
+### §2EH T13-02b 真实工程 Indirect Draw内容/同步有限闭环（2026-10-06，Lead）
+
+- 新默认OFF RealProjectIndirect原生诊断接入原Debug test-cases；未委派/改场景或mask/提交。VKCommandBuffer beginRenderPass上传fallback真实RAW红→绿：补INDEX_READ/INDIRECT_COMMAND_READ与DRAW_INDIRECT，+5/-2；无waitIdle/额外submit/关Validation。非M4-B优化。
+- 真实multi/loop、非索引/索引及forced1.1/fence，32/40字节实际命令与各2048字节golden全一致。缺失第二draw负例两幅各512差、exit1、Validation/泄漏0；未知/互斥/真实空Unicode环境块在设备前拒绝。T09 cold针对回归共享judge PASS，payload77514，不重复旧17案。
+- Root E:/AIProMax/github/cocos4-vulkan/native/build/vulkan-modernization/win-indirect-t13-lead/run-20261006-055716198；terminal10个有限native终态、31 parser fixtures；实际SHA各自保留：d51222fb…/a671d1b1…历史，最终SHA 5a551ccbe0905e7586a7ef05c2ae38721aeaa3f998a324be7835169e64fe42a1。最终modern-loop正常exit0及最终exe独立RenderDoc，源SHA前后一致；不把历史exe改记当前。
+- 当前RDC四实际子draw、源命令words/两个完整golden/两处修复后消费域逐项核验；15 Barrier2 chunks、messages0。实际两Classic RP（autoBarrierEnabled门控保留），不借Dynamic策略ON宣称Dynamic draw。
+- 直接观察非VMA句柄8/8或legacy7/7恰毁一次；7 Buffer/2 Texture facade释放与allocator leak0分列。初稿VMA捕获值导致假未毁计数明确撤销，不能宣称逐Buffer/Image vkDestroy观察。第一次RAW日志完整保留。
+- 取证错误保留：os.environ空串在Windows删除变量，两份OFF日志排除empty-guard证据；显式Unicode环境块后真实empty exit1。初回放文件名双冒号错误保留，合法文件名回放绿；depot_tools formatter9009→已安装LLVM0、实际重建0。
+- 详见VULKAN_INDIRECT_DRAW_VERIFICATION_20261006.md；T13-02b已完成（有限），T13整体/平台/性能未通过；firstInstance0/不测IndirectCount。下一步Bloom内容及Compute前提，M4-B仍等M4-A。
+
+
+### §2EI T13 Bloom内容与Compute前提/整块uniform真实红→绿（2026-10-06，Lead）
+
+- 用户要求推进Bloom内容与Compute场景前提。本块由Lead执行，未委派。原test-project Debug Resources customPipeline=false，不改其默认包；RealProjectScenePackage.h默认OFF根选择器接main.cpp，完整custom包成为唯一FileUtils搜索根。prepare-scene-pipeline.py生成隔离Creator配置/check，预检不声称GPU内容。真实legacy包请求native1在设备前拒绝。
+- 安装Creator3.8.8从实际project cwd/安装JS引擎/纯configPath构建，成功exit36。第一次组件null、扩展CLI解析/仓库Babel污染等红日志保留；programming cache隔离quarantine后clean包恢复Builtin settings。JS3.8.8+当前native是有限混合兼容验证，非版本Gate。Creator information.json own修改备份后恢复初始SHA；设置/native事前清单最终仅main.cpp own入口改变，原资源/场景源码与用户mask层未改作修复。
+- 三生产缺陷实际红→绿：NativeExecutor queue从size>1改非空且保留push/pop恢复；VKDescriptorSet按STORAGE_IMAGE保持GENERAL(VUID04152)，不将全部texture GENERAL；NativeExecutorDescriptor2收集并优先绑定setBuffer整块uniform，缺省成员生成/storage fallback保留。实际旧capture球参数32B全零成为内容负例，不能以Validation干净宣称通过。三个文件+22/-3，无waitIdle/新增submit/关Validation/门控改动，非M4-B。
+- 每步真实CU重编/重链0，最终exeSHA15b99cd7ccc27f2651e0fd07a26d43eacbffbe5755d76a04eedc97fb3866eca6。四最终独立正常进程Compute modern/Classic-fence、Bloom当前阈值包、原默认OFF均native0/error0/leak0，加载Khronos Validation；原工程无triad marker，不捏造。三个final RDC同EXE、Complete/messages0。
+- Bloom两isolated包仅threshold0.05/1.0不同：原输入1920000B相同、8shader相同，Kawase prefilter/down3/up3/combine全descriptor链、GPUUBO及尺寸核验；低阈值RGB非零/高为0，高combine等原图，低高combine差1440000B，末copy全相同。实际16Indexed/11ClassicRP/78Barrier2/1Submit2、BeginRendering0。
+- Compute实际dispatch100×150×1/local8×4×1、32B球参数精确、1920000B storage与full-screen通道归一/垂直翻行全相同；96000背景像素及球心(127,127,255,255)满足tol1。实际1dispatch/1Indexed/1ClassicRP/9Barrier2/1Submit2，BeginRendering0。现代policy ON不改记Dynamic执行；Classic-fence另有native正确性/退休，不冒称该案另抓全像素对照。
+- 共用verify-scene-content.py实际exit0，5反例均拒（包括旧真实全零UBO）；Bloom滑条输入独立JS windowId→null/getViewSize错误未通过，日志/截图保留，包阈值对照不代替交互。原shader非倍数边界/所有intersection/再入设备恢复/完整平台与性能不在有限范围，不修用户排除mask。
+- 证据根win-bloom-compute-t13-lead/run-20261006-092224859505，content-judge/terminal、build/Creator/restore清单、native raw/PNG/RDC/inspect/CB/texture/shader与红例保留。报告VULKAN_BLOOM_COMPUTE_VERIFICATION_20261006.md；T13-03有限完成、04内容有限通过/交互待验证；T13整体仍进行中。下一族Input Attachment/Multi Subpass；MSAA/D-S/Secondary/FSR/异常恢复、性能/M4-A→M4-B、外部平台不变。未stage/commit/push/重复Android或全量无关矩阵。

@@ -1,6 +1,13 @@
 # 真实 Windows 测试工程验证（2026-10-05更新）
 
-结论（2026-10-05最新调查）：**CRT、上传WAW、DS首用与RenderTexture修复的双路径有限证据保留；mask触摸失败现已定位为Canvas层与实际相机visibility不交**。真实工程legacy运行仅临时匹配层后，触摸/stroke及可见刮除出现，恢复原配置再入后重新无响应；未永久修改场景或renderer。BestPractices、工具级stencil内容、整体性能与平台验收仍待；本轮inspector诊断产生11条地址枚举ERROR，不宣称全部日志错误0。修复前历史保留，M0~M7不因此验收。
+早期调查快照（后续状态见下节）：**CRT、上传WAW、DS首用与RenderTexture修复的双路径有限证据保留；mask触摸失败现已定位为Canvas层与实际相机visibility不交**。真实工程legacy运行仅临时匹配层后，触摸/stroke及可见刮除出现，恢复原配置再入后重新无响应；未永久修改场景或renderer。BestPractices、工具级stencil内容、整体性能与平台验收仍待；本轮inspector诊断产生11条地址枚举ERROR，不宣称全部日志错误0。修复前历史保留，M0~M7不因此验收。
+
+## 最新：真实工程cache/prewarm功能合同（2026-10-05，Lead）
+
+- 当前Debug test-cases已在Game ON_START与既有渲染线程接入持久化cache/两known compute recipes；默认OFF、业务graphics共享cache、正常平台关闭后核退休。构建/重链exit0，exeSHA3859b142…cabc9940。源接线patch与复现命令见[模块README](../../native/tests/vulkan-real-project/README.md)。
+- 17终态进程（12完整场景预期合同+1保存失败安全+4启动前参数拒绝）、38parser fixtures、24静态ROI diff0；cold→restored137391字节driver input关联，活checkpoint118866字节恢复，坏数据/identity安全拒绝。正常enabled案14实际graphics消费同cache并销毁，预热pipeline/module/layout各2/2、2/2、1/1，错误/泄漏0。保存失败旧有效文件保留，正例judge拒警告，不以native0当保存成功。
+- raw为`native/build/vulkan-modernization/win-real-prewarm-lead/run-20261005-212151/`；源码/exe前后不变，全部Lead执行。未改Vulkan核心/场景资源、未提交；这是有限功能合同，非性能/全特性/平台Gate。T13正确性覆盖已开始，T05正式采样与M4-A/M4-B继续待前置。
+- 本文件以下早期调查按各自时间点保留。后续BestPractices分类和菜单stencil抓帧已收口有限范围，当前状态以[任务清单](VULKAN_COMPLETION_TASKS.md)和[GPU证据](VULKAN_REAL_PROJECT_GPU_CAPTURE.md)为准；不继续处理用户已排除的mask输入问题。
 
 ## mask 输入与 stencil 单变量运行调查（2026-10-05，Lead）
 
@@ -153,3 +160,12 @@
 
 - 当前源码legacy-v3/modern-v3六轮RT重建与窗口流程均完整exit0/judge PASS/Error-VUID-SYNC-JS0/leak0，12张cycle静态主体diff0；源/exe不变。证据为win-completion-t01-lead/run-20261005-164243788/window-resource-stress/terminal.json；旧helper/期限失败保留，不混用终态。
 - T08有限真实场景压力关闭；T05真实工程性能入口/正式采样尚未完成，M4-B前置与外部平台仍待，不能把本节当最终Vulkan完成声明。
+
+
+## 2026-10-05 T13-02a Instancing 有限补证（Lead）
+
+沿用当前源码真实Debug exe6db8457a…acf7，未冒称本块重建。两实际实例draw1024+976、2000条HSV颜色一致、652种颜色匹配实际输出；现代/Classic-fence重复案自身正常退出0/error0/leak0，Classic含数量调整与窗口恢复。关闭15秒强制结束的初案明确不算退休通过。见[有限报告](VULKAN_INSTANCING_VERIFICATION_20261005.md)。实际Indirect=0、捕获仍Classic；再入、其他渲染族、自然低版与平台/性能不含在此完成范围，T13仍进行中。
+
+## 2026-10-06 T13-02b 最新有限证据（Lead）
+
+原Windows测试工程的[Indirect Draw合同](VULKAN_INDIRECT_DRAW_VERIFICATION_20261006.md)有限通过：真实上传RAW红→绿；索引/非索引multi与loop、32/40字节实际命令和两2048字节golden；缺失draw负例、参数拒绝、退出/Validation/泄漏与当前exe RenderDoc。历史“Indirect实际0次/待工程入口”对应Instancing捕获时点，现已独立补证。实际Classic门控保留，非Dynamic/IndirectCount/平台/性能完成声明；T13与整体验收仍待，15主任务计数不变，下一批Bloom/Compute场景前提。

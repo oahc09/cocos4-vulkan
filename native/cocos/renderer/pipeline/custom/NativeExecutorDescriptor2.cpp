@@ -451,6 +451,9 @@ struct DescriptorSetVisitorContext {
                     for (const auto& d : block.descriptors) {
                         // Get uniform block
                         const auto& uniformBlock = table.uniformBlocks.at(d.descriptorID);
+                        // setBuffer() may supply the entire uniform block. Collect it
+                        // alongside member constants so descriptor construction can bind it.
+                        collectBuffer(renderDataRange, resourceIndex, d.descriptorID, data);
                         collectUniformBuffer(renderDataRange, uniformBlock, data);
                     }
                 } break;
@@ -804,7 +807,7 @@ struct DescriptorSetVisitorContext {
 
     gfx::Buffer* getBuffer(
         boost::span<const DeviceRenderData* const> dataRange,
-        const NameLocalID& attrId) const {
+        const NameLocalID& attrId, bool useDefault = true) const {
         for (auto iter = dataRange.rbegin(); iter != dataRange.rend(); ++iter) {
             const auto* renderData = *iter;
             CC_EXPECTS(renderData);
@@ -814,7 +817,7 @@ struct DescriptorSetVisitorContext {
                 return iter2->second.get();
             }
         }
-        return pipeline.nativeContext.defaultResource->getBuffer();
+        return useDefault ? pipeline.nativeContext.defaultResource->getBuffer() : nullptr;
     }
 
     gfx::Texture* getTexture(
@@ -896,6 +899,15 @@ struct DescriptorSetVisitorContext {
                 case DescriptorTypeOrder::UNIFORM_BUFFER:
                 case DescriptorTypeOrder::DYNAMIC_UNIFORM_BUFFER: {
                     for (const auto& d : block.descriptors) {
+                        // Explicit whole-block buffers must not be replaced by an
+                        // internally generated zero/member-constant buffer.
+                        CC_EXPECTS(d.count == 1);
+                        if (auto* buffer = getBuffer(dataRange, d.descriptorID, false)) {
+                            newSet->bindBuffer(bindId, buffer);
+                            bindId += d.count;
+                            continue;
+                        }
+
                         // Get uniform block
                         const auto& uniformBlock = data.uniformBlocks.at(d.descriptorID);
 
