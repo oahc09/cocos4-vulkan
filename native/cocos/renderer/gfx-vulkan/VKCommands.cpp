@@ -34,6 +34,7 @@
 #include "VKDevice.h"
 #include "VKGPUObjects.h"
 #include "VKPipelineCache.h"
+#include "VKMeasurementProbe.h"
 #include "gfx-base/GFXDef.h"
 #include "states/VKBufferBarrier.h"
 #include "states/VKGeneralBarrier.h"
@@ -812,7 +813,18 @@ void cmdFuncCCVKCreateRenderPass(CCVKDevice *device, CCVKGPURenderPass *gpuRende
             uint32_t prevIdx{0U};
             for (const auto &it : statistics.records) {
                 if (prevRef && prevRef->usage != it.second.usage) {
-                    dependencyManager.append(genDependency(prevIdx, prevRef->usage, it.first, it.second.usage));
+                    auto dependency = genDependency(prevIdx, prevRef->usage, it.first, it.second.usage);
+                    // A terminal input-only subpass still performs the color store operation.
+                    // The layout transition into that subpass must also precede this write,
+                    // not just the fragment shader input read (Vulkan Render Pass Store Operations).
+                    const auto storeOp = attachmentDescriptions[i].storeOp;
+                    if (i < colorAttachmentCount && it.first == statistics.storeSubpass &&
+                        hasFlag(it.second.usage, AttachmentStatistics::SubpassUsage::INPUT) &&
+                        (storeOp == VK_ATTACHMENT_STORE_OP_STORE || storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE)) {
+                        dependency.dstStageMask |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                        dependency.dstAccessMask |= VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                    }
+                    dependencyManager.append(dependency);
                 }
                 prevIdx = it.first;
                 prevRef = &it.second;
@@ -1981,19 +1993,54 @@ bool CCVKGPURenderPass::hasShadingAttachment(uint32_t subPassId) const {
 
 void CCVKGPUBarrierManager::update(CCVKGPUTransportHub *transportHub) {
     if (_buffersToBeChecked.empty() && _texturesToBeChecked.empty()) return;
+    VulkanVisibilityMeasurement measurement;
+    measurement.checkedBuffers = utils::toUint(_buffersToBeChecked.size());
+    measurement.checkedImages = utils::toUint(_texturesToBeChecked.size());
+    VulkanMeasurementScope measurementScope{VulkanMeasurementKind::BufferVisibility, &measurement};
 
     static ccstd::vector<ThsvsAccessType> prevAccesses;
     static ccstd::vector<ThsvsAccessType> nextAccesses;
+    static ccstd::vector<VkBufferMemoryBarrier> vkBufferBarriers;
     static ccstd::vector<VkImageMemoryBarrier> vkImageBarriers;
     VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     vkImageBarriers.clear();
+    vkBufferBarriers.clear();
     prevAccesses.clear();
     nextAccesses.clear();
 
     for (CCVKGPUBuffer *gpuBuffer : _buffersToBeChecked) {
         ccstd::vector<ThsvsAccessType> &render = gpuBuffer->renderAccessTypes;
         if (gpuBuffer->transferAccess == THSVS_ACCESS_NONE) continue;
+        // The upload and declared consumers refer to this same physical buffer.
+        // Limit availability/visibility to that allocation instead of publishing
+        // every upload to the union of all other resources' consumers. Keep the
+        // original global path when consumer metadata or resource bounds are
+        // unavailable; descriptor storage writes are not inferred here.
+        if (gpuBuffer->vkBuffer && gpuBuffer->backingSize && !render.empty()) {
+            ThsvsGlobalBarrier accesses{};
+            accesses.prevAccessCount = 1;
+            accesses.pPrevAccesses = &gpuBuffer->transferAccess;
+            accesses.nextAccessCount = utils::toUint(render.size());
+            accesses.pNextAccesses = render.data();
+            VkMemoryBarrier memory{};
+            VkPipelineStageFlags src = 0, dst = 0;
+            thsvsGetVulkanMemoryBarrier(accesses, &src, &dst, &memory);
+            VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+            barrier.srcAccessMask = memory.srcAccessMask;
+            barrier.dstAccessMask = memory.dstAccessMask;
+            barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.buffer = gpuBuffer->vkBuffer;
+            // Cover all physical frame instances, including delayed recordings.
+            // This memory dependency does not add byte-use leases to those slots.
+            barrier.offset = 0;
+            barrier.size = VK_WHOLE_SIZE;
+            vkBufferBarriers.push_back(barrier);
+            srcStageMask |= src;
+            dstStageMask |= dst;
+            gpuBuffer->transferAccess = THSVS_ACCESS_NONE;
+            continue;
+        }
         if (std::find(prevAccesses.begin(), prevAccesses.end(), gpuBuffer->transferAccess) == prevAccesses.end()) {
             prevAccesses.push_back(gpuBuffer->transferAccess);
         }
@@ -2051,12 +2098,16 @@ void CCVKGPUBarrierManager::update(CCVKGPUTransportHub *transportHub) {
         gpuTexture->transferAccess = THSVS_ACCESS_NONE;
     }
 
-    if (pVkBarrier || !vkImageBarriers.empty()) {
+    if (pVkBarrier || !vkBufferBarriers.empty() || !vkImageBarriers.empty()) {
+        measurement.memoryBarriers = pVkBarrier ? 1 : 0;
+        measurement.bufferBarriers = utils::toUint(vkBufferBarriers.size());
+        measurement.imageBarriers = utils::toUint(vkImageBarriers.size());
         transportHub->checkIn([&](CCVKGPUCommandBuffer *gpuCommandBuffer) {
             for (const auto *texture : _texturesToBeChecked) gpuCommandBuffer->retain(texture);
             for (const auto *buffer : _buffersToBeChecked) gpuCommandBuffer->retain(buffer);
             cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), gpuCommandBuffer->vkCommandBuffer, srcStageMask, dstStageMask, 0,
-                               pVkBarrier ? 1 : 0, pVkBarrier, 0, nullptr, utils::toUint(vkImageBarriers.size()), vkImageBarriers.data());
+                               pVkBarrier ? 1 : 0, pVkBarrier, utils::toUint(vkBufferBarriers.size()), vkBufferBarriers.data(),
+                               utils::toUint(vkImageBarriers.size()), vkImageBarriers.data());
         });
     }
 

@@ -3710,3 +3710,86 @@ SelfTest 未完成（合成 self-test 未实现，如实报 pending）。正常�
 - Compute实际dispatch100×150×1/local8×4×1、32B球参数精确、1920000B storage与full-screen通道归一/垂直翻行全相同；96000背景像素及球心(127,127,255,255)满足tol1。实际1dispatch/1Indexed/1ClassicRP/9Barrier2/1Submit2，BeginRendering0。现代policy ON不改记Dynamic执行；Classic-fence另有native正确性/退休，不冒称该案另抓全像素对照。
 - 共用verify-scene-content.py实际exit0，5反例均拒（包括旧真实全零UBO）；Bloom滑条输入独立JS windowId→null/getViewSize错误未通过，日志/截图保留，包阈值对照不代替交互。原shader非倍数边界/所有intersection/再入设备恢复/完整平台与性能不在有限范围，不修用户排除mask。
 - 证据根win-bloom-compute-t13-lead/run-20261006-092224859505，content-judge/terminal、build/Creator/restore清单、native raw/PNG/RDC/inspect/CB/texture/shader与红例保留。报告VULKAN_BLOOM_COMPUTE_VERIFICATION_20261006.md；T13-03有限完成、04内容有限通过/交互待验证；T13整体仍进行中。下一族Input Attachment/Multi Subpass；MSAA/D-S/Secondary/FSR/异常恢复、性能/M4-A→M4-B、外部平台不变。未stage/commit/push/重复Android或全量无关矩阵。
+
+
+### §2EJ T13-05 Input Attachment / Multi Subpass 真实工程合同与 STORE 同步红→绿（2026-10-06，Lead）
+
+- 用户要求下一步推进此族。本块全部 Lead 执行，使用原 test-project Debug test-cases，新增默认 OFF RealProjectSubpass，累计 integration patch 更新 main/Game/CMake，不改原 Resources/场景/rendering settings。无委派、stage/commit/push。
+- 原生产 input attachment/nextSubpass 路径实际执行。subpass0 红/绿，subpass1 subpassLoad→绿/蓝，RGBA8/X1 两图完整读回；32×16→24×12→32×16 三资源波次每案10496B。现代政策下两 PSO 无 Dynamic variant、实际 Classic。
+- build1=0 但首 modern native1/error10；真实 NextSubpass layout transition→末 input subpass STORE WAW。VKCommands.cpp auto dependency +12/-1 补 terminal color INPUT 的 STORE/DONT_CARE destination COLOR_ATTACHMENT_OUTPUT/COLOR_ATTACHMENT_WRITE，保留 fragment/input/BY_REGION/显式分支；不改 storeOp、不加 ALL_COMMANDS/waitIdle/Validation 屏蔽。真实 build2 CU重编/重链0，旧 source/log/EXE事实保留。
+- 当前exe bd23beefcff0e109d9f77eca914255f092d43be9c425ad41e8671fe62e13dd70，modern Sync2/Submit2/timeline/dynamic政策1 与 effective1.1/fence/legacy 两独立进程 native0/error0/live+post0/leak0。33对象恰销毁一次，6buffer/6image facade drop与VMA leak分开。skip-producer 实际draw0/consumer1/chain1，三波次 source/output各1024/576/1024 mismatch，failures3/native1、Validation0；默认OFF native0，未知mode native1在设备前拒。
+- RenderDoc同exe显式捕获三波次：6Draw/3BeginRP/3Next/3EndRP/6Copy/3Submit2/0BeginRendering；实际RP/subpass/PSO/input-descriptor资源链接、SPIR-V SubpassData+ImageRead、producer/consumer/输入导出全像素golden通过。新共用judge5native+6draw+14拒绝测试exit0含真实旧WAW。Medium access-layout advisory3仍保留，不称Warning0。
+- raw win-subpass-t13-lead/run-20261006-105018258858，terminal/build/source/native/red/RDC/replay/golden/judge保留。报告VULKAN_INPUT_ATTACHMENT_VERIFICATION_20261006.md列G1~G6。累计patch字节保真后reverse-check0；初次EOL检查失败保留。未重复Android/无关全量矩阵。
+- T13-05有限完成；depth input/MSAA/preserve/alias/feedback/更多subpasses/secondary/device loss不混记通过。T13整体仍进行中，主任务总计数不变；下一族T13-06与异常恢复，T05性能/M4-A→M4-B/外部平台条件不变。
+
+
+## 2EK. 2026-10-06 T13-06真实Resolve/Secondary/FSR有限合同（Lead）
+
+- 用户真实Debug工程，两批当前源码构建及各自EXE关联的9 native内容正例/4 RenderDoc replay；color/D32完整golden、secondary execute与recording lease、FSR rate image+实际builtin读取通过。5实际缺失内容负例native1，正常shutdown计数与VMA leak分证；共享judge30反例拒绝、exit0。
+- 旧低版+Dynamic bootstrap/Empty abort强杀60929为红保留；合法1.1/Classic UNSUPPORTED3，新增诊断入口预检冲突native1。不是全局DeviceManager恢复修复。两EXE SHA与具体范围见[VULKAN_RESOLVE_SECONDARY_FSR_VERIFICATION_20261006.md](VULKAN_RESOLVE_SECONDARY_FSR_VERIFICATION_20261006.md)。
+- T13-06有限完成；T13整体仍进行中，继续异常/恢复合同。T05性能与M4-A→M4-B、Android/Apple/XR条件不放行。无stage/commit/push；BestPractices advisory保留。
+
+
+## 2EL. 2026-10-06 T13-07实际管线失败回退与部分结果退休（Lead）
+
+- 新增真实工程默认OFF `secondary-variant-failure`。仅诊断目标Dynamic工厂：先真实driver成功创建、记录真实部分handle，再由hook返回OUT_OF_HOST_MEMORY；不是驱动真实OOM、不是device-loss。生产既有分支立即destroy部分结果、Classic handle保持有效、两fallback flag为真；每波一次实际注入与一次立即销毁，三波完整inheritance/execute/draw/copy/submit/golden通过。
+- 当前源Debug重编/重链build1=0；variant-failure与Secondary/FSR普通回归三个独立进程均native0/error0/live+post0/leak0，21/21、21/21、18/18实际shutdown目标计数一次。共享judge34反例拒绝、exit0，新增4个单变量回退marker坏值。
+- raw win-failure-t13-lead/run-20261006-122017619188/，terminal.json与前版源码备份保留；本项未新增生产同步/等待或改全局capabilities。T13-07部分合同完成，下一步真实工程SurfaceRecreate/MultipleSwapchain。T05及M4-A→M4-B仍按顺序。未stage/commit/push。
+
+### §2EM 2026-10-06：真实工程 WSI S1–S8 补证（Lead）
+
+原Debug工程现有device接线，现代/1.1-fence两实际正例exit0；surface重建、双swapchain、挂起恢复、返回值注入与43/43实际退休通过，live/post/泄漏0。漏surface重建真实负例exit1且补救后清理；14判据反例通过。见[VULKAN_REAL_PROJECT_WSI_VERIFICATION_20261006.md](VULKAN_REAL_PROJECT_WSI_VERIFICATION_20261006.md)。不证明像素内容或device-loss，不宣称整体完成；未提交。
+
+
+## 2EN. 2026-10-06 T05真实工程性能入口与正式采样（Lead，本机有限完成）
+
+- T13本机最小渲染族与异常/WSI合同已补齐；开始用户要求的下一阶段T05。原Debug工程及同源独立Validation OFF Debug树，当前target新构建通过。默认OFF测量入口在原device/渲染线程运行actual atlas-compress；两政策同1.3/timeline，legacy/classic与Sync2/Submit2/Dynamic政策比较，政策ON不等于场景实际Dynamic draw。
+- 启动分列backend、实际Instance/Device创建、cache配置、shader编译/反射/module、graphics factory/driver、首次主线程帧与最大首次材质创建区间。父进程CreateProcess前QPC至实际首个Present SUCCESS另算；诊断entry不是WinMain第一指令，Present API不是首像素可见，附着debugger开销包含在内。
+- 稳定帧CSV包含主线程周期/active/GetThreadTimes、present driver/scoped waits/未分类residual及真实提交primary CB时间戳区间。读取GPU结果在正常device shutdown完成等待后，非逐帧强制同步；不增加submit/waitIdle。FIFO显示节奏与CPU粗粒度实际限制保留。
+- 原共享判据35个真实基座/单字段反例通过；短运行曾发现last-row重复Present与未捕获core Submit2两真实红例，均修复保留旧日志，新startup-smoke exit0/error0/live/post0/leak0。三工程文件patch反向/正向逐hunk往返与实际文件一致，integration-patch-check.json保留。
+- 正式root `native/build/vulkan-modernization/win-real-performance-matrix/run-20261006-132100/`：40独立进程（2 validation×2 policy×5 repeat×cold/restored），300预热+1000有效帧；源/EXE快照、冷payload与暖真实driver输入精确关联、逐进程raw/CSV/启动clock及NVIDIA前后只读sensor保留。终态Complete/Pass/SourceUnchanged=true，40/40运行和共享判据通过；仅数据合同通过，性能Gate尚未授予。
+- 同策略控制root `win-real-performance-controls/run-20261006-141100`：20/20通过，8/10同策略配对的median或P95绝对变化仍超过3%；正式20对中12对正向超过3%。不以平均FPS稳定替代分位数调查。
+- 等待身份root `win-real-wait-identities/run-20261006-143700`：ON/OFF、legacy/modern四案新构建和运行通过，4000行证明actual acquire-only submit wait、同timeline与signal−2、next-slot轮转。原29文件精确源码归档；EOL整理标准化内容一致。详见[VULKAN_REAL_PROJECT_PERFORMANCE_20261006.md](VULKAN_REAL_PROJECT_PERFORMANCE_20261006.md)。
+- T05不授予性能Gate；超过3%需原因/profile/接受理由。M4-A T06仍等T05，M4-B T07不提前改同步。Android可用授权设备、Apple/XR及真实游戏/移动温控外部条件未因此完成。未stage/commit/push。
+
+### §2EN 补记：Immediate编码器隔离与T06本机前置接受（Lead）
+
+- `win-real-immediate-encoder/run-20261006-continue` 20/20；Validation OFF、Classic、相同Immediate模式，只改变legacy与Sync2/Submit2编码器，5轮cold/restored，每进程300预热+1000有效帧。CPU median/P95配对变化的五轮中位数低于3%，全部10对GPU median/P95变化低于0.3%；单轮cold +17.93%等异常原样保留，不以聚合掩去。
+- `win-real-immediate-controls/run-20261006-continue` 10/10同编码器独立进程，2/5对CPU median/P95超过3%；实际32次短timeline wait共0.6157ms，其余无wait。此前20进程无wait不能扩称所有Immediate运行。
+- 原计划§16.7超阈值要求调查及接受理由，详见 `VULKAN_REAL_PROJECT_PERFORMANCE_20261006.md`。结合FIFO三slot等待实证、同策略控制、隔离编码器及实际GPU/内容合同，Lead有限接受本机当前静态场景M4-A前置，允许T07；未证明全部driver/OS抖动根因、统计等价性或全平台性能Gate。T05/T06有限完成，外部设备/游戏/温控条件不变。
+
+### §2EO 2026-10-06：M4-B已知buffer上传可见性资源化（Lead，进行中）
+
+- 仅在上述前置接受后实施。真实test-cases现有device、默认OFF `CC_VULKAN_REAL_PROJECT_VISIBILITY` 接线，三波64/128/64字节compute双输入求和、实际buffer resize替换、facade在提交前drop、旧recording仍成功dispatch/copy/submit，完整256字节golden。消费元数据由此fixture显式声明，只读compute并在第二buffer附加indirect消费；不冒称descriptor buffer自动推导已接线。
+- 实际旧global红例exit1：每波global=1/resources=0、golden差0、12/12退休、live/post0，仅资源范围断言三次失败。然后生产BarrierManager为有句柄/physical bounds/非空consumer metadata的buffer发whole-physical-buffer VkBufferMemoryBarrier，各resource access独立，root stages仍兼容legacy union；未知consumer/句柄/bounds保留原global路径。不改completion signal、wait/submit或texture路径。
+- 当前源ON build0，legacy、Sync2/Submit2、1.1/fence、未知metadata回退四实际正例exit0，均Validation/live/post/leak0、12/12管线相关对象退休。wrong-input三波实际golden各1个word差、exit1，unknown mode clean1。共享judge五案通过，22/22单变量/结构夹具通过。
+- raw `win-visibility-t07-lead/{red,green}`；本次执行均Lead。新增真实工程三文件累计patch在隔离原始baseline反向/正向roundtrip一致；测试工程这三文件未被其HEAD跟踪，不能用git show HEAD当原始文件，已改用SHA留存的测量源码快照重建baseline（首次只读尝试失败无源改动）。
+- 同源同harness新build baseline/current OFF，只有BarrierManager源码差异，旧/新源码和EXE SHA保留；20进程300+1000帧的5轮cold/restored前后对照正在执行。不在采样期间编译Android或其它GPU任务。下一步基于候选已有明确nextAccesses收窄Dynamic post-render，历史producer未明的pre范围保留，不凭layout猜访问。
+
+### §2EO 补记：前后性能超阈值与直接测量（Lead，未接受性能）
+
+- 上述原20进程已经完成且运行判据20/20通过，源码冻结及EXE校验通过。CPU主线程周期median的五对变化中位数为cold +5.484181%、restored +4.593184%，超过3%；GPU区间配对变化均低于0.3%。运行数据合同通过不等于性能通过，Dynamic post范围优化暂停，先调查已实施的buffer资源化。
+- 原baseline在相同Debug目录使用不同EXE文件名，属于潜在混杂变量。追加同一旧binary、不同文件名五对10进程控制，全部运行通过；CPU median signed变化为+1.049%、+9.337%、−7.844%、+8.147%、−7.312%。双向变化不能证明文件名效应或根因，原数据与控制均保留，不删除超阈值记录。
+- 新增默认不读取时钟的BufferVisibility测量入口及显式`CC_VULKAN_REAL_PROJECT_PERF_VISIBILITY_TRACE=1`诊断sidecar。两版都由真实OFF工程当前harness构建，临时baseline源码精确恢复后再构建current。两次40帧/10预热短测全部通过：每版40次manager调用、120次checked image、checked buffer和实际生成的global/buffer/image barrier均为0；manager总时长baseline125500ns/current127200ns。此静态稳态样本并未执行目标buffer上传资源化，不能把CPU变化直接归因为该分支。
+- raw分别位于`win-visibility-t07-lead/performance`、`basename-controls`、`visibility-profile`；五轮同一路径、同一EXE名称、冷暖各1000有效帧的instrumented对照正在执行。采样期间无并行构建/GPU任务。全部执行归属Lead；不授予M4-B/整体性能或平台Gate。
+
+### §2EP 2026-10-06：M4-B本机首批有限收口（Lead）
+
+- 同路径诊断采样已完成：20/20进程、20000有效帧、source冻结与当前exe恢复通过。CPU frame median配对变化中位数cold −2.49%/restored −6.36%，P95 −1.67%/−2.33%；GPU所有配对绝对变化低于0.3%。各缓存状态仍有一轮正向超3%，原值/P99保留；全部采样帧checked buffer及实际生成barrier均0，不能声称上传提速。结合原超阈值、同binary双向控制、同路径重复及直接manager测量，有限接受已测静态帧周期，未证明全部host根因/负载性能。post缩窄未被这组Classic稳态执行，不借此声称post性能通过。
+- 只在上述调查后继续已知Dynamic post范围。实际候选nextAccess声明COLOR_WRITE或DS_WRITE；post分别缩到COLOR_ATTACHMENT_OUTPUT/COLOR_WRITE或EARLY|LATE/DS_WRITE，保留fixed depth resolve源COLOR阶段、未知历史pre及whole-submission completion。没有新增wait/submit或默认功能政策。
+- 新默认OFF物理image/CB观察器取得旧宽范围红：post4、precise0、broad4，golden正确但native1。首次误选Submit2被现有resolve fixture自身拒，不用作该红例；随后legacy submit+Sync2 barrier红才有效。源码改动后真实Debug先build0；legacy/Sync2×color/depth×2x/4x共8案native0、4个post均精确、golden/实际submit/4-4退休/live+post+leak0，8篡改夹具拒绝。
+- 同最终exe再跑buffer完整6案，legacy、Sync2/Submit2、1.1/fence与global回退正例native0；wrong-input/unknown mode负例native1；三波每次manager transport CB与user compute/readback CB不同且各成功转发一次；完整256B golden、resize/drop旧lease与12/12退休通过，23判据夹具通过。raw `win-visibility-t07-lead/{post-red2,post-green,final-combined}`，执行均Lead。
+- 当前源码Android build.ps1 -Jobs4 exit0，16步含VKCommands/VKCommandBuffer等实际编译及engine/probe最终链接；保留既有warning。当前adb devices列表为空，未运行Android。完整接受理由与边界见[VULKAN_REAL_PROJECT_SYNC_SCOPE_20261006.md](VULKAN_REAL_PROJECT_SYNC_SCOPE_20261006.md)。T07首批实现/本机有限合同完成；T12整体仍等待自然低版设备、Android/Apple/XR与平台/游戏温控证据。未stage/commit/push。
+- scopes参数前置比较改为无分配strcmp后新build0，正常Sync2/color2 native0、未知值/缺resolve前提各backend初始化前native1。原空值拒绝夹具真实失败：Windows空变量等价删除，child None/ERROR_ENVVAR_NOT_FOUND；只保留为默认OFF内容证据，不把该夹具改记通过。另补triad唯一/ENABLED离线判据，原8案重判8/8、追加3反例拒；原运行judge字节已归档，区别运行与后续重判。详见报告与preflight-final原始记录。
+
+
+### §2EQ 2026-10-06：连续上传正确性与实际批次性能收口（Lead，性能归因未关闭）
+
+- 真实Windows工程默认OFF诊断扩展24波buffer/texture，多次staging upload、实际Compute/Copy/Submit、全内容golden、resize/drop lease、目标管线/module/layout/set-layout退休；legacy、Sync2/Submit2、forced1.1/fence和真实错误内容4/4、14夹具。默认原buffer合同6/6、Dynamic color/depth resolve×2x/4x×legacy/Sync2共8/8回归。最终共同exe7ebc4ba0…；不扩称mipgen/所有负载/自然1.1平台。
+- 历史失败原样保留：protected接口编译C2248；transfer-only texture创建view真实04441；误要求packed staging row导致96个诊断FAIL（完整内容本来正确），修为合法padding。首个ON性能probe旧resized日志错误撤销，正式schema改cycle/末轮真实resize。
+- OFF真实项目两版同harness/同路径/EXE名称各新build；只精确替换manager函数并finally恢复原生产源码。首轮模式字符串重复比较/输入生成/池增长混杂，撤销−23%优化收益。缓存模式/生成移出计时/完成后安全pool reset后P95+5.471%仍保留，旧same-binary控制不能冒称根因。
+- 最新13列host五分段闭合、真实wait API及staging来源观察，前后五轮各1000有效批次十进程10/10，source/current exe精确恢复。paired中位数batchP50−1.097%/P95−1.319%/P99+4.294%；manager−26.623%/−24.296%/−14.286%；user Compute/readback CB GPU+.078%/−.364%/+.177%。不是整帧/GPU transport/显示，不能把局部数当FPS。
+- 原始十案逐100帧块/top50分析exit0，重用严格judge；五段严格闭合。top50 manager占0.21%~1.12%、completion36.88%~90.87%、wait API31.91%~89.75%、submit4.12%~47.75%，定位到host等待/提交，未证明调度、驱动、GPU或温控根因。
+- 仅诊断退出安全性补清profile/waitScope/借用句柄，query析构待tracked完成后销毁（计时外、不用waitIdle）；该revision真实ONbuild0+新1300批次进程/1000样本/CLEAN通过；11数据判据检查全过，但没有执行query API故障注入。旧18案对应修订前snapshot，SHA已核，不假称新版全矩阵。
+- 新版OFF同binary freshbuild0；五对十进程10/10、10000有效样本、source/exe不变。hostP95自对照−11.912%~+24.134%，正反波动；不是“>3%已查清”。原计划§16.7是Median/P95 Frame Time调查条件，P99批次额外观察不新增自动FAIL条件。进一步host等待/调度证据与性能接受理由仍待。
+- 详见[VULKAN_UPLOAD_STRESS_VERIFICATION_20261006.md](VULKAN_UPLOAD_STRESS_VERIFICATION_20261006.md)；raw在`native/build/vulkan-modernization/win-upload-stress-lead/`对应formal2/final-*/bounded-*/scoped-*/cleanup-safety根，运行与离线执行均Lead。本轮生产源码保持进入时内容，Android编译证据复用既有当前生产源码链接，不宣称本轮Android运行。Apple/XR按用户最新范围暂缓，不阻塞本阶段；T10设备/游戏温控与T14性能归因未齐，T12整体未通过。未stage/commit/push。

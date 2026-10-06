@@ -1,29 +1,6 @@
---- a/native/engine/win64/CMakeLists.txt
-+++ b/native/engine/win64/CMakeLists.txt
-@@ -15,3 +15,20 @@
-     ${CC_ALL_SOURCES}
- )
- cc_windows_after_target(${EXECUTABLE_NAME})
-+
-+# Native diagnostics are inert unless their explicit opt-in environment is set.
-+if(CC_USE_VULKAN)
-+    target_sources(${EXECUTABLE_NAME} PRIVATE
-+        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectPrewarm.cpp
-+        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectIndirect.cpp)
-+    target_include_directories(${EXECUTABLE_NAME} PRIVATE
-+        ${COCOS_X_PATH}/tests/vulkan-real-project
-+        ${COCOS_X_PATH}/cocos/renderer)
-+    target_compile_definitions(${EXECUTABLE_NAME} PRIVATE
-+        CC_VULKAN_REAL_PROJECT_DIAGNOSTICS=1)
-+    # Match the backend's private TBB import name, including Debug builds.
-+    set_source_files_properties(
-+        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectPrewarm.cpp
-+        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectIndirect.cpp
-+        PROPERTIES COMPILE_DEFINITIONS "__TBB_LIB_NAME=tbb")
-+endif()
 --- a/native/engine/win64/main.cpp
 +++ b/native/engine/win64/main.cpp
-@@ -28,6 +28,19 @@
+@@ -28,6 +28,25 @@
  #include <windows.h>
  
  #include "platform/BasePlatform.h"
@@ -31,19 +8,25 @@
 +#include "RealProjectPrewarm.h"
 +#include "RealProjectIndirect.h"
 +#include "RealProjectScenePackage.h"
++#include "RealProjectSubpass.h"
++#include "RealProjectResolve.h"
++#include "RealProjectFeatures.h"
++#include "RealProjectWsi.h"
++#include "RealProjectPerformance.h"
++#include "RealProjectVisibility.h"
 +
 +static int RunPlatformWithDiagnostics(int argc, const char **argv) {
 +  if (!cc::vulkan_test::prepare() || !cc::vulkan_test::prepareIndirect() ||
-+      !cc::vulkan_test::installScenePackage()) return 1;
++      !cc::vulkan_test::prepareSubpass() || !cc::vulkan_test::prepareResolve() || !cc::vulkan_test::prepareFeatures() || !cc::vulkan_test::prepareWsi() || !cc::vulkan_test::preparePerformance() || !cc::vulkan_test::prepareVisibility() || !cc::vulkan_test::installScenePackage()) return 1;
 +  auto *platform = cc::BasePlatform::getPlatform();
 +  const int result = platform->init() ? -1 : platform->run(argc, argv);
-+  return cc::vulkan_test::finishIndirect(cc::vulkan_test::finish(result));
++  return cc::vulkan_test::finishVisibility(cc::vulkan_test::finishPerformance(cc::vulkan_test::finishWsi(cc::vulkan_test::finishFeatures(cc::vulkan_test::finishResolve(cc::vulkan_test::finishSubpass(cc::vulkan_test::finishIndirect(cc::vulkan_test::finish(result))))))));
 +}
 +#endif
  
  #if defined(CC_SERVER_MODE)
  
-@@ -82,7 +95,11 @@
+@@ -82,7 +101,11 @@
      }
    }
  
@@ -55,7 +38,7 @@
  
    for (const char *arg : argv) {
      free(const_cast<char *>(arg));
-@@ -92,11 +109,18 @@
+@@ -92,11 +115,18 @@
    if (!FreeConsole()) {
      MessageBox(NULL, L"Failed to free the console!", NULL, MB_ICONEXCLAMATION);
    }
@@ -76,31 +59,43 @@
  #endif
 --- a/native/engine/common/Classes/Game.cpp
 +++ b/native/engine/common/Classes/Game.cpp
-@@ -24,6 +24,10 @@
+@@ -24,6 +24,16 @@
   THE SOFTWARE.
   ****************************************************************************/
  #include "Game.h"
 +#if defined(CC_VULKAN_REAL_PROJECT_DIAGNOSTICS)
 +#include "RealProjectPrewarm.h"
 +#include "RealProjectIndirect.h"
++#include "RealProjectSubpass.h"
++#include "RealProjectResolve.h"
++#include "RealProjectFeatures.h"
++#include "RealProjectWsi.h"
++#include "RealProjectPerformance.h"
++#include "RealProjectVisibility.h"
 +#endif
  
  #ifndef GAME_NAME
  #define GAME_NAME "CocosGame";
-@@ -52,8 +56,22 @@
+@@ -52,8 +62,28 @@
  
    _xxteaKey = SCRIPT_XXTEAKEY;
  
 -  BaseGame::init();
 -  return 0;
 +#if defined(CC_VULKAN_REAL_PROJECT_DIAGNOSTICS)
-+  if (!cc::vulkan_test::prepare() || !cc::vulkan_test::prepareIndirect()) return -1;
++  if (!cc::vulkan_test::prepare() || !cc::vulkan_test::prepareIndirect() || !cc::vulkan_test::prepareSubpass() || !cc::vulkan_test::prepareResolve() || !cc::vulkan_test::prepareFeatures() || !cc::vulkan_test::prepareWsi() || !cc::vulkan_test::preparePerformance() || !cc::vulkan_test::prepareVisibility()) return -1;
 +  auto engine = getEngine();
 +  auto prewarm = engine->on<cc::BaseEngine::EngineStatusChange>(
 +      [](cc::BaseEngine *, cc::BaseEngine::EngineStatus status) {
 +        if (status == cc::BaseEngine::ON_START) {
 +          cc::vulkan_test::start();
 +          cc::vulkan_test::startIndirect();
++          cc::vulkan_test::startSubpass();
++          cc::vulkan_test::startResolve();
++          cc::vulkan_test::startFeatures();
++          cc::vulkan_test::startWsi();
++          cc::vulkan_test::startPerformance();
++          cc::vulkan_test::startVisibility();
 +        }
 +      });
 +  const int result = BaseGame::init();
@@ -112,3 +107,42 @@
  }
  
  void Game::onPause() { BaseGame::onPause(); }
+--- a/native/engine/win64/CMakeLists.txt
++++ b/native/engine/win64/CMakeLists.txt
+@@ -15,3 +15,36 @@
+     ${CC_ALL_SOURCES}
+ )
+ cc_windows_after_target(${EXECUTABLE_NAME})
++
++# Native diagnostics are inert unless their explicit opt-in environment is set.
++if(CC_USE_VULKAN)
++    target_sources(${EXECUTABLE_NAME} PRIVATE
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectPrewarm.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectIndirect.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectSubpass.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectResolve.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectColorResolve.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectDepthResolve.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectFeatures.cpp
++    ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectPerformance.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectVisibility.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectWsi.cpp)
++    target_include_directories(${EXECUTABLE_NAME} PRIVATE
++        ${COCOS_X_PATH}/tests/vulkan-real-project
++        ${COCOS_X_PATH}/cocos/renderer)
++    target_compile_definitions(${EXECUTABLE_NAME} PRIVATE
++        CC_VULKAN_REAL_PROJECT_DIAGNOSTICS=1)
++    # Match the backend's private TBB import name, including Debug builds.
++    set_source_files_properties(
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectPrewarm.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectIndirect.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectSubpass.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectResolve.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectColorResolve.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectDepthResolve.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectFeatures.cpp
++    ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectPerformance.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectVisibility.cpp
++        ${COCOS_X_PATH}/tests/vulkan-real-project/RealProjectWsi.cpp
++        PROPERTIES COMPILE_DEFINITIONS "__TBB_LIB_NAME=tbb")
++endif()

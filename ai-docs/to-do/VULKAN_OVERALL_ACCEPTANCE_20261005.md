@@ -2,6 +2,15 @@
 
 日期：2026-10-05。执行渠道：Lead。结论：**整体验收未通过；真实 Windows 工程已测功能范围通过，最终目标尚未完成。**
 
+## 2026-10-06 最新证据增量（不改写历史61条审查）
+
+- 当前任务状态以 [VULKAN_COMPLETION_TASKS.md](VULKAN_COMPLETION_TASKS.md) 为准。以下旧表中的“真实工程cache未接”“Input/Subpass尚缺”“M4-A本机前置未通过”“M4-B未实现”等，是2026-10-05审查时的状态，不能作为2026-10-06仍未实现的结论。
+- T09已在真实工程完成opt-in cache/prewarm、冷暖关联与安全拒绝；T13已补各渲染族的本机最小内容/异常/退休合同；T05有真实工程启动/first-use/冷暖、固定预热与正式P50/P95/P99，T06记录本机M4-A有限接受理由。相关报告及真实原始数据链接见任务列表。
+- T07首批已知buffer资源化及已知Dynamic post stage/access缩窄完成本机有限验证。六案buffer合同、八案color/depth resolve、原性能超阈值及重复/控制调查、当前Android编译链接，见 [2026-10-06同步范围报告](VULKAN_REAL_PROJECT_SYNC_SCOPE_20261006.md)。未知历史访问保留安全回退；未声明上传密集或全部Dynamic负载性能收益。
+- 仍不能关闭最终DoD：Android真实设备/自然低版GPU/KHR与fallback运行、rotation/background/恢复/生命周期及温控；跨设备golden/实际游戏负载性能。Apple/XR按本阶段范围调整暂缓。当前adb列表为空，Windows有限运行和Android链接不代替这些证据。loader/physical/XR低于最低API等端到端边界，不由forced高能力Windows tier或CPU契约扩称自然设备通过。
+- 更多CSM/Compute非倍数resize、Bloom实际滑条交互及未纳入最小矩阵的组合，仍不得从现有有限结果推断通过。已知mask层匹配问题按用户指示不处理；Bloom场景侧JS问题与Vulkan有限内容合同分列。
+- 结论仍是**整体验收未通过**。这次更新是旧审查与当前证据的状态对齐，不冒称重新执行了61项跨平台验收，也没有修改原计划或降低完成条件。执行渠道Lead；未stage/commit/push。
+
 验收依据是原计划 §8~20、§22 和 §23 的 61 条 DoD，不降低标准，也不把阶段性提交或任务单中的有限调查完成等同全部通过。本次核对代码差异、原始日志、终态、源码/产物哈希和已有 GPU 内容证据；没有新增 GPU 运行、重建、平台测试或生产修复。历史 Orca Worker 的构建/运行归属仍按 PROGRESS 原记录保留。
 
 ## 后续功能闭环更新（2026-10-05，Lead）

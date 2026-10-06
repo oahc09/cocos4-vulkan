@@ -23,6 +23,8 @@
 ****************************************************************************/
 
 #include "VKDevice.h"
+#include <atomic>
+#include "VKMeasurementProbe.h"
 #include <cstdlib>
 #include "VKBuffer.h"
 #include "VKCommandBuffer.h"
@@ -249,6 +251,7 @@ CCVKDevice::~CCVKDevice() {
 }
 
 bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
+    VulkanMeasurementScope measurement(VulkanMeasurementKind::BackendInit, this);
     _lastValidationErrorCount = 0;
     _xr = CC_GET_XR_INTERFACE();
     if (_xr) {
@@ -445,6 +448,7 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
     if (_xr) {
         _gpuDevice->vkDevice = _xr->createXRVulkanDevice(&deviceCreateInfo);
     } else {
+        VulkanMeasurementScope creation(VulkanMeasurementKind::DeviceCreation, this);
         deviceResult = vkCreateDevice(_gpuContext->physicalDevice, &deviceCreateInfo, nullptr, &_gpuDevice->vkDevice);
     }
     const bool created = deviceResult == VK_SUCCESS && _gpuDevice->vkDevice != VK_NULL_HANDLE;
@@ -1156,7 +1160,25 @@ void CCVKDevice::acquire(Swapchain *const *swapchains, uint32_t count) {
     }
 }
 
+namespace {
+std::atomic<VulkanMeasurementCallback> measurementCallback{nullptr};
+std::atomic<VulkanMeasurementPresentPolicy> measurementPresentPolicy{VulkanMeasurementPresentPolicy::Keep};
+}
+VulkanMeasurementCallback setVulkanMeasurementCallback(VulkanMeasurementCallback callback) noexcept {
+    return measurementCallback.exchange(callback, std::memory_order_acq_rel);
+}
+VulkanMeasurementCallback getVulkanMeasurementCallback() noexcept {
+    return measurementCallback.load(std::memory_order_acquire);
+}
+VulkanMeasurementPresentPolicy setVulkanMeasurementPresentPolicy(VulkanMeasurementPresentPolicy policy) noexcept {
+    return measurementPresentPolicy.exchange(policy, std::memory_order_acq_rel);
+}
+VulkanMeasurementPresentPolicy getVulkanMeasurementPresentPolicy() noexcept {
+    return measurementPresentPolicy.load(std::memory_order_acquire);
+}
+
 void CCVKDevice::present() {
+    VulkanMeasurementScope measurement(VulkanMeasurementKind::Present, this);
     CC_PROFILE(CCVKDevicePresent);
     auto *queue = static_cast<CCVKQueue *>(_queue);
     _numDrawCalls = queue->_numDrawCalls;

@@ -25,6 +25,7 @@
 #include "VKPipelineState.h"
 #include "VKCommands.h"
 #include "VKDevice.h"
+#include "VKMeasurementProbe.h"
 #include "VKPipelineLayout.h"
 #include "VKRenderPass.h"
 #include "VKShader.h"
@@ -41,6 +42,7 @@ CCVKPipelineState::~CCVKPipelineState() {
 }
 
 void CCVKPipelineState::doInit(const PipelineStateInfo & /*info*/) {
+    VulkanMeasurementScope measurement(VulkanMeasurementKind::GraphicsFactory, this, _bindPoint == PipelineBindPoint::GRAPHICS);
     _gpuPipelineState = ccnew CCVKGPUPipelineState;
     _gpuPipelineState->bindPoint = _bindPoint;
     _gpuPipelineState->primitive = _primitive;

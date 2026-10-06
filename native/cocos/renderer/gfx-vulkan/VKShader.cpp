@@ -27,6 +27,7 @@
 #include "VKCommands.h"
 #include "VKDevice.h"
 #include "VKShader.h"
+#include "VKMeasurementProbe.h"
 
 namespace cc {
 namespace gfx {
@@ -42,6 +43,7 @@ CCVKShader::~CCVKShader() {
 namespace {
 
 void initGpuShader(CCVKGPUShader *gpuShader) {
+    VulkanMeasurementScope measurement(VulkanMeasurementKind::ShaderCompile, gpuShader);
     cmdFuncCCVKCreateShader(CCVKDevice::getInstance(), gpuShader);
 
     // Clear shader source after they're uploaded to GPU

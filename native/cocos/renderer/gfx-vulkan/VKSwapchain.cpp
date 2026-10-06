@@ -25,6 +25,7 @@
 #include "VKSwapchain.h"
 #include "VKCommands.h"
 #include "VKDevice.h"
+#include "VKMeasurementProbe.h"
 #include "VKGPUObjects.h"
 #include "VKQueue.h"
 #include "VKRenderPass.h"
@@ -111,6 +112,11 @@ CCVKSwapchain::~CCVKSwapchain() {
 }
 
 void CCVKSwapchain::doInit(const SwapchainInfo &info) {
+    // Opt-in measurement uses the normal present-mode selection and pNext
+    // construction. Default and XR swapchains keep the application's policy.
+    if (!CC_GET_XR_INTERFACE() && getVulkanMeasurementPresentPolicy() == VulkanMeasurementPresentPolicy::Immediate) {
+        _vsyncMode = VsyncMode::OFF;
+    }
     _xr = CC_GET_XR_INTERFACE();
     if (_xr) {
         _xr->updateXRSwapchainTypedID(getTypedID());

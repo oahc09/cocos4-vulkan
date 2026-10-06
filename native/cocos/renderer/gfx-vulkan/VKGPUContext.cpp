@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "VKGPUObjects.h"
+#include "VKMeasurementProbe.h"
 #include "application/ApplicationManager.h"
 #include "platform/interfaces/modules/IXRInterface.h"
 #include <cstdlib>
@@ -324,6 +325,7 @@ bool CCVKGPUContext::initialize() {
         xr->initializeVulkanData(vkGetInstanceProcAddr);
         vkInstance = xr->createXRVulkanInstance(instanceInfo);
     } else {
+        VulkanMeasurementScope creation(VulkanMeasurementKind::InstanceCreation, this);
         VkResult res = vkCreateInstance(&instanceInfo, nullptr, &vkInstance);
         if (res != VK_SUCCESS) {
             CC_LOG_ERROR("Create Vulkan instance failed: %d", res);
