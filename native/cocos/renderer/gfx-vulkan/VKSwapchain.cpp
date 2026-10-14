@@ -94,12 +94,12 @@ void CCVKGPUWSIGeneration::releaseVulkanObjects() {
     // work/presentation has completed; stale generation gates reject reuse.
     // Removing dependent Vulkan objects first also permits a NEW surface to
     // attach to the same native window (otherwise NATIVE_WINDOW_IN_USE).
-    for (auto framebuffer : framebuffers) vkDestroyFramebuffer(device, framebuffer, nullptr);
+    for (VkFramebuffer framebuffer : framebuffers) vkDestroyFramebuffer(device, framebuffer, nullptr);
     framebuffers.clear();
-    for (auto view : imageViews) vkDestroyImageView(device, view, nullptr);
+    for (VkImageView view : imageViews) vkDestroyImageView(device, view, nullptr);
     imageViews.clear();
-    for (auto semaphore : renderFinished) vkDestroySemaphore(device, semaphore, nullptr);
-    for (auto fence : presentFences) vkDestroyFence(device, fence, nullptr);
+    for (VkSemaphore semaphore : renderFinished) vkDestroySemaphore(device, semaphore, nullptr);
+    for (VkFence fence : presentFences) vkDestroyFence(device, fence, nullptr);
     renderFinished.clear();
     presentFences.clear();
     if (swapchain) vkDestroySwapchainKHR(device, swapchain, nullptr);

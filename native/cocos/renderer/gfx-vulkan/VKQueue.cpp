@@ -121,7 +121,7 @@ VkResult CCVKQueue::submitChecked(CommandBuffer *const *cmdBuffs, uint32_t count
     ccstd::vector<VkSemaphore> signals;
     signals.reserve(_gpuQueue->acquiredSwapchains.size());
     for (auto *swapchain : _gpuQueue->acquiredSwapchains) {
-        auto signal = swapchain->imageGeneration->renderFinished[swapchain->curImageIndex];
+        VkSemaphore signal = swapchain->imageGeneration->renderFinished[swapchain->curImageIndex];
         if (_gpuQueue->presentSemaphoresSignaled) {
             // Multiple actual submits in a frame: the previous signal is
             // consumed by this submit, not by present. Retire it on this
@@ -130,7 +130,7 @@ VkResult CCVKQueue::submitChecked(CommandBuffer *const *cmdBuffs, uint32_t count
             VkSemaphoreCreateInfo createInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
             const VkResult result = vkCreateSemaphore(device->gpuDevice()->vkDevice, &createInfo, nullptr, &signal);
             if (result != VK_SUCCESS) {
-                for (auto created : signals) vkDestroySemaphore(device->gpuDevice()->vkDevice, created, nullptr);
+                for (VkSemaphore created : signals) vkDestroySemaphore(device->gpuDevice()->vkDevice, created, nullptr);
                 if (result == VK_ERROR_DEVICE_LOST) device->gpuDevice()->deviceLost = true;
                 return result;
             }
@@ -144,7 +144,7 @@ VkResult CCVKQueue::submitChecked(CommandBuffer *const *cmdBuffs, uint32_t count
     for (size_t i=0; i<waitSemaphoreCount; ++i) {
         submitInfo.waits.push_back({_gpuQueue->lastSignaledSemaphores[i], _gpuQueue->submitStageMasks[i]});
     }
-    for (auto signal : signals) submitInfo.signals.push_back({signal});
+    for (VkSemaphore signal : signals) submitInfo.signals.push_back({signal});
 
     VkFence vkFence = _gpuQueue->completionTracker->usesTimeline() ? VK_NULL_HANDLE : device->gpuFencePool()->alloc();
     GpuCompletionPoint point;
@@ -169,7 +169,7 @@ VkResult CCVKQueue::submitChecked(CommandBuffer *const *cmdBuffs, uint32_t count
         // OOM left the submit untouched; DEVICE_LOST was explicitly waited
         // above. Only now may the uncommitted replacement handles be released.
         if (_gpuQueue->presentSemaphoresSignaled) {
-            for (auto created : signals) vkDestroySemaphore(device->gpuDevice()->vkDevice, created, nullptr);
+            for (VkSemaphore created : signals) vkDestroySemaphore(device->gpuDevice()->vkDevice, created, nullptr);
         }
         if (result == VK_ERROR_DEVICE_LOST) device->gpuDevice()->deviceLost = true;
         return result;
