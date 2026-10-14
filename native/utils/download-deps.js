@@ -4,7 +4,7 @@
 const fs = require('fs-extra');
 const ps = require('path');
 const yargs = require('yargs');
-const cp = require('child_process');
+const { checkoutDependency } = require('./checkout-deps');
 const tmp = require('tmp');
 
 main();
@@ -41,14 +41,7 @@ async function downloadDepsThroughGit(
     const configFileStash = await stashConfigFile();
     try {
         await fs.emptyDir(targetDir);
-        cp.execSync(`git clone ${url} ${ps.basename(targetDir)} --branch ${config.from.checkout || 'master'} --depth 1`, {
-            cwd: ps.dirname(targetDir),
-            stdio: 'inherit',
-        });
-        cp.execSync(`git log --oneline -1`, {
-            cwd: targetDir,
-            stdio: 'inherit',
-        });
+        checkoutDependency(url, config.from.checkout || 'master', targetDir);
     } finally {
         await configFileStash.pop();
     }

@@ -27,7 +27,7 @@ jobs:
         with:
           node-version: '20'
       - name: External source configuration
-        run: node --test .github/workflows/get-native-external-version.test.js .github/workflows/get-eslint-files.test.js
+        run: node --test .github/workflows/get-native-external-version.test.js .github/workflows/get-eslint-files.test.js native/utils/checkout-deps.test.js
       - name: Configure CPU contract and failure tests
         run: |
           cmake -S native/tests/vulkan-api-version -B build/contracts -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}

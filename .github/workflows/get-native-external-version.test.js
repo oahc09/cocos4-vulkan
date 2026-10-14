@@ -33,7 +33,8 @@ test('all external workflows consume configured repository', () => {
         assert(!workflow.includes('https://github.com/cocos/cocos-engine-external'), name);
         assert(!workflow.includes('repository: cocos/cocos-engine-external'), name);
         for (const block of workflow.split(/\n\s*- name:/)) {
-            if (block.includes('git clone --branch "$EXT_VERSION"')) assert(block.includes('--url'), name);
+            assert(!block.includes('git clone --branch "$EXT_VERSION"'), name);
+            if (block.includes('checkout-deps.js')) assert(block.includes('--url'), name);
             if (block.includes('archive --format=tar FETCH_HEAD')) {
                 assert(block.includes('remote set-url origin "$EXT_REPOSITORY"'), name);
                 assert(block.includes('fetch --prune origin "$EXT_VERSION"'), name);
