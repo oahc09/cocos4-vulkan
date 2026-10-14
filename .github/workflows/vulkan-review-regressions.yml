@@ -1,0 +1,42 @@
+name: <Native> Vulkan Review Regressions
+on:
+  pull_request:
+    paths:
+      - 'native/**'
+      - '.github/workflows/**'
+  push:
+    branches:
+      - 'fix/vulkan-review-*'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: vulkan-review-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: External source configuration
+        run: node --test .github/workflows/get-native-external-version.test.js .github/workflows/get-eslint-files.test.js native/utils/checkout-deps.test.js
+      - name: Configure CPU contract and failure tests
+        run: |
+          cmake -S native/tests/vulkan-api-version -B build/contracts -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          cmake -S native/tests/vulkan-review -B build/review -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+      - name: Build CPU tests
+        run: |
+          cmake --build build/contracts --parallel 2
+          cmake --build build/review --parallel 2
+      - name: Run CPU tests
+        run: |
+          ctest --test-dir build/contracts --output-on-failure
+          ctest --test-dir build/review --output-on-failure

@@ -312,7 +312,9 @@ int main() {
         badFsrCycle("fsr width 0", [](VkPipelineFragmentShadingRateStateCreateInfoKHR &v, void *) { v.fragmentSize = {0, 4}; }, nullptr);
         badFsrCycle("fsr height 0", [](VkPipelineFragmentShadingRateStateCreateInfoKHR &v, void *) { v.fragmentSize = {2, 0}; }, nullptr);
         badFsrCycle("fsr bad op0", [](VkPipelineFragmentShadingRateStateCreateInfoKHR &v, void *) { v.combinerOps[0] = static_cast<VkFragmentShadingRateCombinerOpKHR>(99); }, nullptr);
-        badFsrCycle("fsr bad op1", [](VkPipelineFragmentShadingRateStateCreateInfoKHR &v, void *) { v.combinerOps[1] = static_cast<VkFragmentShadingRateCombinerOpKHR>(-1); }, nullptr);
+        // A declared sentinel is outside the supported operations without
+        // constructing an out-of-range C++ enum value (undefined behavior).
+        badFsrCycle("fsr bad op1", [](VkPipelineFragmentShadingRateStateCreateInfoKHR &v, void *) { v.combinerOps[1] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MAX_ENUM_KHR; }, nullptr);
     }
 
     // --- 10: three signature invalid conditions, each independent ---

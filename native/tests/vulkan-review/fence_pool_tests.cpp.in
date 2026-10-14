@@ -1,0 +1,15 @@
+
+#include <vulkan/vulkan_core.h>
+#include <vector>
+#include <cstdio>
+#include <cstdlib>
+namespace ccstd=std;
+#define VK_CHECK(x) x
+#define CHECK(x) do{if(!(x))std::abort();}while(0)
+struct CCVKGPUDevice { VkDevice vkDevice=(VkDevice)1; };
+static uintptr_t nextFence=10;static uint32_t resetCount=0,destroyed=0;
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateFence(VkDevice,const VkFenceCreateInfo*,const VkAllocationCallbacks*,VkFence*out){*out=(VkFence)++nextFence;return VK_SUCCESS;}
+extern "C" VKAPI_ATTR void VKAPI_CALL vkDestroyFence(VkDevice,VkFence,const VkAllocationCallbacks*){++destroyed;}
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkResetFences(VkDevice,uint32_t count,const VkFence*){resetCount+=count;return VK_SUCCESS;}
+// @PRODUCTION_CLASS@
+int main(){CCVKGPUDevice d;{CCVKGPUFencePool p(&d);auto f1=p.alloc();auto f2=p.alloc();CHECK(p.size()==2);p.cancel(f1);CHECK(p.size()==2);p.cancel(f2);CHECK(p.size()==1&&p.allocatedCount()==2);CHECK(p.alloc()==f2);p.cancel(f2);p.reset();CHECK(resetCount==1&&p.size()==0);CHECK(p.alloc()==f1);}CHECK(destroyed==2);std::puts("PASS production FencePool cancellation only drops unsubmitted tail, preserves existing active fences and safely reuses capacity.");}

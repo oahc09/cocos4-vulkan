@@ -31,6 +31,8 @@
 #include "VKRenderPass.h"
 #include "VKTexture.h"
 #include "VKUtils.h"
+#include "VKWSILifetime.h"
+#include <cstdlib>
 
 #include "application/ApplicationManager.h"
 #include "platform/interfaces/modules/ISystemWindow.h"
@@ -50,32 +52,39 @@ CCVKGPUWSISurface::~CCVKGPUWSISurface() {
     if (surface) vkDestroySurfaceKHR(instance, surface, nullptr);
 }
 
-void CCVKGPUWSISurface::retireGenerations() {
+VkResult CCVKGPUWSISurface::retireGenerations(uint64_t timeout) {
+    VkResult status = VK_SUCCESS;
     for (const auto &weak : generations) {
         if (auto generation = weak.lock()) {
             if (!generation->retired) {
-                generation->waitForPresentCompletion();
+                const VkResult result = generation->waitForPresentCompletion(timeout);
+                if (!wsiTeardownSafe(result)) return result;
+                if (result == VK_ERROR_DEVICE_LOST) status = result;
                 generation->releaseVulkanObjects();
             }
         }
     }
     generations.clear();
+    return status;
 }
 
-void CCVKGPUWSIGeneration::waitForPresentCompletion() {
+VkResult CCVKGPUWSIGeneration::waitForPresentCompletion(uint64_t timeout) {
+    if (retired) return VK_SUCCESS;
     if (presentFences.empty()) {
-        // Pure core WSI has no host presentation-completion primitive. This
-        // is the conventional retirement fallback, not a normative proof.
-        // Never used for ordinary frame pacing or semaphore reuse.
-        VK_CHECK(vkDeviceWaitIdle(device));
-    } else {
-        for (size_t i = 0; i < presentFences.size(); ++i) {
-            if (presentPending[i]) {
-                VK_CHECK(vkWaitForFences(device, 1, &presentFences[i], VK_TRUE, DEFAULT_TIMEOUT));
-                presentPending[i] = false;
-            }
+        // Core WSI has no host presentation-completion primitive. Preserve
+        // the conventional retirement fallback, never use it for frame pacing.
+        return vkDeviceWaitIdle(device);
+    }
+    VkResult status = VK_SUCCESS;
+    for (size_t i = 0; i < presentFences.size(); ++i) {
+        if (presentPending[i]) {
+            const VkResult result = vkWaitForFences(device, 1, &presentFences[i], VK_TRUE, timeout);
+            if (!wsiTeardownSafe(result)) return result;
+            presentPending[i] = false;
+            if (result == VK_ERROR_DEVICE_LOST) status = result;
         }
     }
+    return status;
 }
 
 void CCVKGPUWSIGeneration::releaseVulkanObjects() {
@@ -85,12 +94,12 @@ void CCVKGPUWSIGeneration::releaseVulkanObjects() {
     // work/presentation has completed; stale generation gates reject reuse.
     // Removing dependent Vulkan objects first also permits a NEW surface to
     // attach to the same native window (otherwise NATIVE_WINDOW_IN_USE).
-    for (auto framebuffer : framebuffers) vkDestroyFramebuffer(device, framebuffer, nullptr);
+    for (VkFramebuffer framebuffer : framebuffers) vkDestroyFramebuffer(device, framebuffer, nullptr);
     framebuffers.clear();
-    for (auto view : imageViews) vkDestroyImageView(device, view, nullptr);
+    for (VkImageView view : imageViews) vkDestroyImageView(device, view, nullptr);
     imageViews.clear();
-    for (auto semaphore : renderFinished) vkDestroySemaphore(device, semaphore, nullptr);
-    for (auto fence : presentFences) vkDestroyFence(device, fence, nullptr);
+    for (VkSemaphore semaphore : renderFinished) vkDestroySemaphore(device, semaphore, nullptr);
+    for (VkFence fence : presentFences) vkDestroyFence(device, fence, nullptr);
     renderFinished.clear();
     presentFences.clear();
     if (swapchain) vkDestroySwapchainKHR(device, swapchain, nullptr);
@@ -99,7 +108,12 @@ void CCVKGPUWSIGeneration::releaseVulkanObjects() {
 }
 
 CCVKGPUWSIGeneration::~CCVKGPUWSIGeneration() {
-    releaseVulkanObjects();
+    // Normal retirement explicitly releases before dropping its owning lease.
+    // A last-reference bug cannot silently destroy pending presentation work.
+    if (!retired && swapchain) {
+        CC_LOG_ERROR("Vulkan WSI generation lost its retirement owner.");
+        std::abort();
+    }
 }
 
 CCVKSwapchain::CCVKSwapchain() {
@@ -312,27 +326,16 @@ Format CCVKSwapchain::selectSurfaceConfig() {
 
 void CCVKSwapchain::doDestroy() {
     if (!_gpuSwapchain) return;
-
-    CCVKDevice::getInstance()->abortAcquiredSwapchain(_gpuSwapchain);
-    CCVKDevice::getInstance()->waitAllFences();
-    _gpuSwapchain->wsi.setSurfaceAvailable(false);
-    _gpuSwapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
-    if (_gpuSwapchain->surfaceOwner) _gpuSwapchain->surfaceOwner->retireGenerations();
-
+    auto *device = CCVKDevice::getInstance();
+    auto *gpuDevice = device->gpuDevice();
+    // This void API is also called from the destructor. Transfer the owning
+    // lease BEFORE trying a finite wait; timeout must not destroy or leak it.
+    _gpuSwapchain->retiring = true;
+    gpuDevice->deferredSwapchains.push_back(_gpuSwapchain);
+    const VkResult result = device->retireDeferredSwapchains();
+    if (!wsiTeardownSafe(result)) CC_LOG_ERROR("Vulkan swapchain destruction deferred: %d", result);
     _depthStencilTexture = nullptr;
     _colorTexture = nullptr;
-
-    auto *gpuDevice = CCVKDevice::getInstance()->gpuDevice();
-    const auto *gpuContext = CCVKDevice::getInstance()->gpuContext();
-
-    destroySwapchain(gpuDevice);
-
-    if (_gpuSwapchain->vkSurface != VK_NULL_HANDLE) {
-        _gpuSwapchain->surfaceOwner.reset();
-        _gpuSwapchain->vkSurface = VK_NULL_HANDLE;
-    }
-
-    gpuDevice->swapchains.erase(_gpuSwapchain);
     _gpuSwapchain = nullptr;
 }
 
@@ -341,7 +344,11 @@ void CCVKSwapchain::doResize(uint32_t width, uint32_t height, SurfaceTransform /
 }
 
 bool CCVKSwapchain::checkSwapchainStatus(uint32_t width, uint32_t height) {
-    if (_gpuSwapchain) CCVKDevice::getInstance()->abortAcquiredSwapchain(_gpuSwapchain);
+    if (_gpuSwapchain && _gpuSwapchain->surfaceRetirementPending) {
+        doDestroySurface();
+        return false;
+    }
+    if (_gpuSwapchain && CCVKDevice::getInstance()->abortAcquiredSwapchain(_gpuSwapchain) != VK_SUCCESS) return false;
     if (!_gpuSwapchain || (!_xr && (_gpuSwapchain->wsi.hasFatalError() || _gpuSwapchain->wsi.needsSurfaceRecreate()))) return false;
     uint32_t newWidth = width;
     uint32_t newHeight = height;
@@ -368,7 +375,7 @@ bool CCVKSwapchain::checkSwapchainStatus(uint32_t width, uint32_t height) {
         gpuDevice->curBackBufferIndex = 0;
         _gpuSwapchain->curImageIndex = 0;
         CCVKDevice::getInstance()->updateBackBufferCount(imageCount);
-        CCVKDevice::getInstance()->waitAllFences();
+        if (CCVKDevice::getInstance()->waitAllFences() != VK_SUCCESS) return false;
         CC_LOG_INFO("Resizing surface: %dx%d, surface rotation: %d degrees", newWidth, newHeight, static_cast<uint32_t>(_transform) * 90);
     } else {
         if (_gpuSwapchain->vkSurface == VK_NULL_HANDLE) { // vkSurface will be set to VK_NULL_HANDLE after call doDestroySurface
@@ -442,7 +449,16 @@ bool CCVKSwapchain::checkSwapchainStatus(uint32_t width, uint32_t height) {
 
         CC_LOG_INFO("Resizing surface: %dx%d", newWidth, newHeight);
 
-        CCVKDevice::getInstance()->waitAllFences();
+        if (CCVKDevice::getInstance()->waitAllFences() != VK_SUCCESS) return false;
+        // Prove old-generation presentation completion BEFORE vkCreateSwapchain
+        // retires the old handle; a timeout leaves a retryable old generation.
+        if (_gpuSwapchain->imageGeneration) {
+            const VkResult result = _gpuSwapchain->imageGeneration->waitForPresentCompletion();
+            if (result != VK_SUCCESS) {
+                if (result == VK_ERROR_DEVICE_LOST) gpuDevice->deviceLost = true;
+                return false;
+            }
+        }
 
         VkSwapchainKHR vkSwapchain = VK_NULL_HANDLE;
         // Declare the one selected mode when maintenance1 is enabled. This
@@ -462,8 +478,10 @@ bool CCVKSwapchain::checkSwapchainStatus(uint32_t width, uint32_t height) {
             // recoverable retry must not pass that retired handle again.
             if (recreateResult == VK_ERROR_OUT_OF_DATE_KHR || recreateResult == VK_ERROR_SURFACE_LOST_KHR ||
                 recreateResult == VK_NOT_READY || recreateResult == VK_TIMEOUT) {
-                _gpuSwapchain->surfaceOwner->retireGenerations();
-                destroySwapchain(gpuDevice);
+                // The current generation was waited above. Only drop handles
+                // after their result-bearing retirement succeeds.
+                const VkResult result = destroySwapchain(gpuDevice);
+                if (!wsiTeardownSafe(result)) return false;
                 _gpuSwapchain->createInfo.oldSwapchain = VK_NULL_HANDLE;
             }
             _gpuSwapchain->wsi.onRecreateFailure(recreateResult);
@@ -472,8 +490,13 @@ bool CCVKSwapchain::checkSwapchainStatus(uint32_t width, uint32_t height) {
             return false;
         }
 
-        destroySwapchain(gpuDevice);
-
+        // No work was enqueued between the successful preflight and creation.
+        if (_gpuSwapchain->imageGeneration) _gpuSwapchain->imageGeneration->releaseVulkanObjects();
+        _gpuSwapchain->imageGeneration.reset();
+        _gpuSwapchain->swapchainImages.clear();
+#if CC_SWAPPY_ENABLED
+        if (_gpuSwapchain->vkSwapchain) SwappyVk_destroySwapchain(gpuDevice->vkDevice, _gpuSwapchain->vkSwapchain);
+#endif
         _gpuSwapchain->vkSwapchain = vkSwapchain;
         _gpuSwapchain->imageGeneration = std::make_shared<CCVKGPUWSIGeneration>();
         auto &generation = *_gpuSwapchain->imageGeneration;
@@ -572,41 +595,41 @@ bool CCVKSwapchain::checkSwapchainStatus(uint32_t width, uint32_t height) {
     return true;
 }
 
-void CCVKSwapchain::destroySwapchain(CCVKGPUDevice *gpuDevice) {
-    if (_gpuSwapchain->vkSwapchain != VK_NULL_HANDLE) {
-        CCVKDevice::getInstance()->waitAllFences();
-        if (!_gpuSwapchain->imageGeneration->retired) _gpuSwapchain->imageGeneration->waitForPresentCompletion();
+VkResult CCVKSwapchain::destroySwapchain(CCVKGPUDevice *gpuDevice) {
+    if (_gpuSwapchain->vkSwapchain == VK_NULL_HANDLE) return VK_SUCCESS;
+    const VkResult submitted = CCVKDevice::getInstance()->waitAllFences();
+    if (!wsiTeardownSafe(submitted)) return submitted;
+    const VkResult presented = _gpuSwapchain->imageGeneration->waitForPresentCompletion();
+    if (!wsiTeardownSafe(presented)) return presented;
+    if (presented == VK_ERROR_DEVICE_LOST) gpuDevice->deviceLost = true;
+    _gpuSwapchain->imageGeneration->releaseVulkanObjects();
 #if CC_SWAPPY_ENABLED
-        SwappyVk_destroySwapchain(gpuDevice->vkDevice, _gpuSwapchain->vkSwapchain);
+    SwappyVk_destroySwapchain(gpuDevice->vkDevice, _gpuSwapchain->vkSwapchain);
 #endif
-        _gpuSwapchain->swapchainImages.clear();
-        _gpuSwapchain->imageGeneration.reset();
-        _gpuSwapchain->vkSwapchain = VK_NULL_HANDLE;
-        _gpuSwapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
-    }
+    _gpuSwapchain->swapchainImages.clear();
+    _gpuSwapchain->imageGeneration.reset();
+    _gpuSwapchain->vkSwapchain = VK_NULL_HANDLE;
+    _gpuSwapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
+    return gpuDevice->deviceLost ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
 }
 
 void CCVKSwapchain::doDestroySurface() {
     if (!_gpuSwapchain || _gpuSwapchain->vkSurface == VK_NULL_HANDLE) return;
-    auto *gpuDevice = CCVKDevice::getInstance()->gpuDevice();
-    const auto *gpuContext = CCVKDevice::getInstance()->gpuContext();
-
-    CCVKDevice::getInstance()->abortAcquiredSwapchain(_gpuSwapchain);
-    _gpuSwapchain->wsi.setSurfaceAvailable(false);
-    _gpuSwapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
-    CCVKDevice::getInstance()->waitAllFences();
-    _gpuSwapchain->surfaceOwner->retireGenerations();
-    destroySwapchain(gpuDevice);
+    _gpuSwapchain->surfaceRetirementPending = true;
+    _gpuSwapchain->retiring = true;
+    const VkResult result = CCVKDevice::getInstance()->retireSwapchain(_gpuSwapchain);
+    if (!wsiTeardownSafe(result)) {
+        CC_LOG_ERROR("Vulkan surface destruction deferred: %d", result);
+        return;
+    }
+    _gpuSwapchain->surfaceRetirementPending = false;
     _gpuSwapchain->lastPresentResult = VK_NOT_READY;
-    _gpuSwapchain->wsi.setSurfaceAvailable(false);
-    _gpuSwapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
-
-    _gpuSwapchain->surfaceOwner.reset();
-    _gpuSwapchain->vkSurface = VK_NULL_HANDLE;
 }
 
 void CCVKSwapchain::doCreateSurface(void *windowHandle) { // NOLINT
-    if (!_gpuSwapchain || _gpuSwapchain->vkSurface != VK_NULL_HANDLE) return;
+    if (_gpuSwapchain && _gpuSwapchain->surfaceRetirementPending) doDestroySurface();
+    if (!_gpuSwapchain || _gpuSwapchain->vkSurface != VK_NULL_HANDLE || CCVKDevice::getInstance()->gpuDevice()->deviceLost) return;
+    _gpuSwapchain->retiring = false;
     createVkSurface();
 #if CC_PLATFORM == CC_PLATFORM_ANDROID
     auto *window = CC_GET_SYSTEM_WINDOW(_windowId);

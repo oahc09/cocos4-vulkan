@@ -42,6 +42,7 @@
 #include "VKRenderPass.h"
 #include "VKShader.h"
 #include "VKSwapchain.h"
+#include "VKWSILifetime.h"
 #include "VKTexture.h"
 #include "VKUtils.h"
 #include "base/Utils.h"
@@ -146,17 +147,22 @@ VkResult CCVKGPUDevice::submitTracked(CCVKGPUQueue *queue, const VulkanSubmitBat
     for (auto slot : slots) {
         auto &points = slotCompletions[slot];
         auto existing = std::find_if(points.begin(), points.end(), [&](GpuCompletionPoint candidate) { return candidate.domain == domain; });
-        if (result == VK_SUCCESS) *existing = point;
-        else if (!existing->value) points.erase(existing);
+        if (result == VK_SUCCESS) {
+            *existing = point;
+        } else if (!existing->value) {
+            points.erase(existing);
+        }
     }
     if (result == VK_SUCCESS) {
         if (submission) submission->point = point;
         queue->lastCompletion = point;
         ++trackedSubmitCount;
         if (fence) ++submissionFenceCount;
-    } else if (submission) {
+    } else if (submission && result != VK_ERROR_DEVICE_LOST) {
         recordingSubmissions.pop_back();
     }
+    // A lost submit may have executed. Retain its empty-point submission lease
+    // until final device teardown proves quiescence; do not mark it completed.
     return result;
 }
 
@@ -347,9 +353,9 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
         requestFeature(vkCaps.fragmentShadingRate, true);
     }
     // Portability subset is mandatory when advertised and is a device extension.
-    constexpr const char *PORTABILITY_SUBSET = "VK_KHR_portability_subset";
-    if (isExtensionSupported(PORTABILITY_SUBSET, _gpuDevice->extensions)) {
-        requestedExtensions.push_back(PORTABILITY_SUBSET);
+    constexpr const char *portabilitySubsetExtension = "VK_KHR_portability_subset";
+    if (isExtensionSupported(portabilitySubsetExtension, _gpuDevice->extensions)) {
+        requestedExtensions.push_back(portabilitySubsetExtension);
     }
 
 #if CC_SWAPPY_ENABLED
@@ -390,12 +396,17 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
         for (size_t start = 0; start < names.size();) {
             const size_t end = names.find(',', start);
             const auto name = names.substr(start, end == ccstd::string::npos ? end : end - start);
-            if (name == "timelineSemaphore") vkCaps.timelineSemaphore.requested = false;
-            else if (name == "synchronization2") vkCaps.synchronization2.requested = false;
-            else if (name == "dynamicRendering") vkCaps.dynamicRendering.requested = false;
-            else if (name == "maintenance4") vkCaps.maintenance4.requested = false;
-            else if (name == "swapchainMaintenance1") vkCaps.swapchainMaintenance1.requested = false;
-            else {
+            if (name == "timelineSemaphore") {
+                vkCaps.timelineSemaphore.requested = false;
+            } else if (name == "synchronization2") {
+                vkCaps.synchronization2.requested = false;
+            } else if (name == "dynamicRendering") {
+                vkCaps.dynamicRendering.requested = false;
+            } else if (name == "maintenance4") {
+                vkCaps.maintenance4.requested = false;
+            } else if (name == "swapchainMaintenance1") {
+                vkCaps.swapchainMaintenance1.requested = false;
+            } else {
                 CC_LOG_ERROR("Unknown CC_VULKAN_DISABLE_FEATURES entry: %s", name.c_str());
                 return failBootstrap();
             }
@@ -458,7 +469,7 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
         CC_LOG_ERROR("Vulkan logical device creation failed: result=%d", deviceResult);
         return failBootstrap();
     }
-    vkCaps.portabilitySubset = checkExtension(PORTABILITY_SUBSET);
+    vkCaps.portabilitySubset = checkExtension(portabilitySubsetExtension);
     _gpuDevice->runtimePaths = normalizeRuntimePaths(vkCaps, VulkanRuntimePaths{});
     volkLoadDevice(_gpuDevice->vkDevice);
     if (vkCaps.swapchainMaintenance1.enabled && !vkReleaseSwapchainImagesEXT) {
@@ -491,8 +502,9 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
 #if CC_DEBUG
     if (const char *completionMode = std::getenv("CC_VULKAN_COMPLETION")) {
         const ccstd::string mode(completionMode);
-        if (mode == "fence") useTimeline = false;
-        else if (mode == "timeline") {
+        if (mode == "fence") {
+            useTimeline = false;
+        } else if (mode == "timeline") {
             if (!vkCaps.timelineSemaphore.enabled) {
                 CC_LOG_ERROR("CC_VULKAN_COMPLETION=timeline requires enabled timelineSemaphore.");
                 return failBootstrap();
@@ -863,11 +875,46 @@ bool CCVKDevice::doInit(const DeviceInfo & /*info*/) {
 }
 
 void CCVKDevice::doDestroy() {
+    // Preserve the existing synchronous final-shutdown contract. Ordinary
+    // acquire/resize/destroySurface paths keep finite, retryable waits; only
+    // final device shutdown waits until work really finishes (or device loss).
+    constexpr uint64_t shutdownTimeout = UINT64_MAX;
     if (_queue && _gpuTransportHub && _gpuDevice && _gpuDevice->vkDevice) {
-        for (auto *swapchain : _gpuDevice->swapchains) abortAcquiredSwapchain(swapchain);
+        // Drain any transaction already in progress first.
+        for (auto *swapchain : _gpuDevice->swapchains) {
+            if (!swapchain->abortPending) continue;
+            const VkResult result = abortAcquiredSwapchain(swapchain, shutdownTimeout);
+            if (!wsiTeardownSafe(result)) {
+                CC_LOG_ERROR("Vulkan final device destruction cannot drain WSI safely: %d", result);
+                std::abort();
+            }
+        }
+        for (auto *swapchain : _gpuDevice->swapchains) {
+            const VkResult result = retireSwapchain(swapchain, shutdownTimeout);
+            if (!wsiTeardownSafe(result)) {
+                CC_LOG_ERROR("Vulkan final device destruction cannot retire WSI safely: %d", result);
+                std::abort();
+            }
+        }
+        _gpuDevice->swapchains.clear();
+        _gpuDevice->deferredSwapchains.clear();
     }
-    waitAllFences();
-    if (_gpuDevice && _gpuDevice->vkDevice) VK_CHECK(vkDeviceWaitIdle(_gpuDevice->vkDevice));
+    const VkResult waited = waitAllFences(shutdownTimeout);
+    if (!wsiTeardownSafe(waited)) {
+        // Device::~Device/Destroy return void and all pools are about to die.
+        // There is no legal retry owner beyond this boundary. Do not turn a
+        // failed final wait into Vulkan destruction of pending resources.
+        CC_LOG_ERROR("Vulkan final device destruction cannot prove completion: %d", waited);
+        std::abort();
+    }
+
+    if (_gpuDevice && _gpuDevice->vkDevice) {
+        const VkResult result = vkDeviceWaitIdle(_gpuDevice->vkDevice);
+        if (!wsiTeardownSafe(result)) {
+            CC_LOG_ERROR("Vulkan final device idle failed: %d", result);
+            std::abort();
+        }
+    }
 
     // Release typed recording references while descriptor/IA hubs and bins live.
     if (_gpuDevice) _gpuDevice->recordingSubmissions.clear();
@@ -975,52 +1022,119 @@ VkImageMemoryBarrier presentBarrier{
 };
 } // namespace
 
-void CCVKDevice::abortAcquiredSwapchain(CCVKGPUSwapchain *swapchain) {
+VkResult CCVKDevice::retryPendingWSIAborts() {
+    while (true) {
+        const auto pending = std::find_if(gpuSwapchains.begin(), gpuSwapchains.end(), [](const auto *swapchain) { return swapchain->abortPending; });
+        if (pending == gpuSwapchains.end()) return _gpuDevice->deviceLost ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
+        const VkResult result = abortAcquiredSwapchain(*pending);
+        if (!wsiTeardownSafe(result)) return result;
+    }
+}
+
+bool CCVKDevice::hasPendingWSIAbort() const {
+    return _gpuDevice && std::any_of(gpuSwapchains.begin(), gpuSwapchains.end(), [](const auto *swapchain) {
+        return swapchain->abortPending;
+    });
+}
+
+VkResult CCVKDevice::abortAcquiredSwapchain(CCVKGPUSwapchain *swapchain, uint64_t timeout) {
     const auto found = std::find(gpuSwapchains.begin(), gpuSwapchains.end(), swapchain);
-    if (found == gpuSwapchains.end()) return; // includes the independent XR path
+    if (found == gpuSwapchains.end()) return VK_SUCCESS; // independent XR path
+    // Finish the existing transaction before touching any other batch wait.
+    for (const auto *other : gpuSwapchains) {
+        if (other != swapchain && other->abortPending) return VK_NOT_READY;
+    }
     const size_t slot = static_cast<size_t>(found - gpuSwapchains.begin());
     const uint32_t imageIndex = vkSwapchainIndices[slot];
     auto *queue = static_cast<CCVKQueue *>(_queue);
     auto *gpuQueue = queue->gpuQueue();
+    swapchain->abortPending = true;
 
-    // Complete only engine transport here, never an abandoned user's CB.
-    // This consumes every acquire wait in the batch; other windows retain
-    // their acquired image and their own render-finished signal afterwards.
-    if (!gpuQueue->presentSemaphoresSignaled || !_gpuTransportHub->empty(false) || !_gpuTransportHub->empty(true)) {
-        queue->submit(nullptr, 0);
+    if (!_gpuDevice->deviceLost && swapchain->abortCompletion.empty()) {
+        // Complete transport, never an abandoned user's CB. A failed transport
+        // submit retains its recordings and original binary waits for retry.
+        if (!gpuQueue->presentSemaphoresSignaled || !_gpuTransportHub->empty(false) || !_gpuTransportHub->empty(true) ||
+            !queue->_pendingEarlyCommands.empty() || !queue->_pendingLateCommands.empty()) {
+            const VkResult result = queue->submitChecked(nullptr, 0);
+            if (result != VK_SUCCESS) {
+                if (result != VK_ERROR_DEVICE_LOST) return result;
+                _gpuDevice->deviceLost = true;
+            }
+        }
+        if (!_gpuDevice->deviceLost) {
+            VulkanSubmitBatch drain;
+            drain.waits.push_back({gpuQueue->lastSignaledSemaphores[slot], VK_PIPELINE_STAGE_ALL_COMMANDS_BIT});
+            if (!gpuQueue->completionTracker->usesTimeline() && !swapchain->abortFence) {
+                const VkFenceCreateInfo info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+                const VkResult result = vkCreateFence(_gpuDevice->vkDevice, &info, nullptr, &swapchain->abortFence);
+                if (result != VK_SUCCESS) return result;
+            }
+            const VkResult result = _gpuDevice->submitTracked(gpuQueue, drain, swapchain->abortFence, swapchain->abortCompletion);
+            if (result != VK_SUCCESS) {
+                if (result == VK_ERROR_DEVICE_LOST) {
+                    // This submit may have executed: keep the fence until the
+                    // lost-device idle wait below proves it is no longer in use.
+                    _gpuDevice->deviceLost = true;
+                } else {
+                    // OOM guarantees the submit did not modify its inputs.
+                    if (swapchain->abortFence) vkDestroyFence(_gpuDevice->vkDevice, swapchain->abortFence, nullptr);
+                    swapchain->abortFence = VK_NULL_HANDLE;
+                    return result;
+                }
+            }
+        }
     }
-    const VkSemaphore signal = gpuQueue->lastSignaledSemaphores[slot];
-    const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-    VulkanSubmitBatch drain;
-    drain.waits.push_back({signal, stage});
-    const VkFence fence = gpuQueue->completionTracker->usesTimeline() ? VK_NULL_HANDLE : gpuFencePool()->alloc();
-    GpuCompletionPoint drainPoint;
-    VK_CHECK(_gpuDevice->submitTracked(gpuQueue, drain, fence, drainPoint));
-    VK_CHECK(gpuQueue->completionTracker->wait(drainPoint, DEFAULT_TIMEOUT));
-    swapchain->imageGeneration->imageAcquired[imageIndex] = false;
-
-    if (_gpuDevice->capabilities.swapchainMaintenance1.enabled) {
+    if (!_gpuDevice->deviceLost) {
+        const VkResult result = gpuQueue->completionTracker->wait(swapchain->abortCompletion, timeout);
+        if (result != VK_SUCCESS) {
+            if (result != VK_ERROR_DEVICE_LOST) return result;
+            _gpuDevice->deviceLost = true;
+        }
+    }
+    bool retireChain = !_gpuDevice->capabilities.swapchainMaintenance1.enabled || swapchain->wsi.needsSurfaceRecreate();
+    if (_gpuDevice->deviceLost) {
+        // Lost-device teardown is distinct from normal completion/reuse.
+        // vkDeviceWaitIdle is required to return in finite time after loss.
+        const VkResult result = waitAllFences(timeout);
+        if (!wsiTeardownSafe(result)) return result;
+    } else if (!retireChain) {
         VkReleaseSwapchainImagesInfoEXT release{VK_STRUCTURE_TYPE_RELEASE_SWAPCHAIN_IMAGES_INFO_EXT};
         release.swapchain = swapchain->vkSwapchain;
         release.imageIndexCount = 1;
         release.pImageIndices = &imageIndex;
         const VkResult result = vkReleaseSwapchainImagesEXT(_gpuDevice->vkDevice, &release);
-        if (result == VK_SUCCESS) swapchain->wsi.onAcquiredImageReleased();
-        else swapchain->wsi.onRecreateFailure(result);
-    } else {
-        // Base WSI has no image-release command. Retire this window's chain
-        // after consumption; zero-size/surface-loss must not trigger present.
-        waitAllFences();
+        if (result == VK_ERROR_SURFACE_LOST_KHR) {
+            // Retrying release cannot repair a lost surface. The drain is
+            // already complete; retire its generation instead, without present.
+            swapchain->wsi.onRecreateFailure(result);
+            retireChain = true;
+        } else if (result != VK_SUCCESS) {
+            return result; // keep ownership and the completed drain for retry
+        } else {
+            swapchain->wsi.onAcquiredImageReleased();
+        }
+    }
+    if (!_gpuDevice->deviceLost && retireChain) {
+        const VkResult submitted = waitAllFences(timeout);
+        if (!wsiTeardownSafe(submitted)) return submitted;
+        const VkResult presented = swapchain->surfaceOwner->retireGenerations(timeout);
+        if (!wsiTeardownSafe(presented)) return presented;
+        if (presented == VK_ERROR_DEVICE_LOST) _gpuDevice->deviceLost = true;
 #if CC_SWAPPY_ENABLED
         SwappyVk_destroySwapchain(_gpuDevice->vkDevice, swapchain->vkSwapchain);
 #endif
-        swapchain->surfaceOwner->retireGenerations();
         swapchain->imageGeneration.reset();
         swapchain->swapchainImages.clear();
         swapchain->vkSwapchain = VK_NULL_HANDLE;
         swapchain->createInfo.oldSwapchain = VK_NULL_HANDLE;
         swapchain->wsi.requestRecreate();
     }
+    if (swapchain->imageGeneration) swapchain->imageGeneration->imageAcquired[imageIndex] = false;
+    if (swapchain->abortFence) vkDestroyFence(_gpuDevice->vkDevice, swapchain->abortFence, nullptr);
+    swapchain->abortFence = VK_NULL_HANDLE;
+    swapchain->abortCompletion = {};
+    swapchain->abortPending = false;
+    if (_gpuDevice->deviceLost) swapchain->wsi.onRecreateFailure(VK_ERROR_DEVICE_LOST);
     swapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
 
     gpuQueue->lastSignaledSemaphores.erase(gpuQueue->lastSignaledSemaphores.begin() + slot);
@@ -1029,8 +1143,50 @@ void CCVKDevice::abortAcquiredSwapchain(CCVKGPUSwapchain *swapchain) {
     vkSwapchains.erase(vkSwapchains.begin() + slot);
     vkSwapchainIndices.erase(vkSwapchainIndices.begin() + slot);
     gpuQueue->presentSemaphoresSignaled = !gpuSwapchains.empty();
+    if (!_gpuDevice->deviceLost) prepareWSISubmit(gpuQueue);
+    return _gpuDevice->deviceLost ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
+}
 
-    prepareWSISubmit(gpuQueue);
+VkResult CCVKDevice::retireSwapchain(CCVKGPUSwapchain *swapchain, uint64_t timeout) {
+    const VkResult aborted = abortAcquiredSwapchain(swapchain, timeout);
+    if (!wsiTeardownSafe(aborted)) return aborted;
+    const VkResult submitted = waitAllFences(timeout);
+    if (!wsiTeardownSafe(submitted)) return submitted;
+    if (swapchain->surfaceOwner) {
+        const VkResult presented = swapchain->surfaceOwner->retireGenerations(timeout);
+        if (!wsiTeardownSafe(presented)) return presented;
+        if (presented == VK_ERROR_DEVICE_LOST) _gpuDevice->deviceLost = true;
+    }
+#if CC_SWAPPY_ENABLED
+    if (swapchain->vkSwapchain) SwappyVk_destroySwapchain(_gpuDevice->vkDevice, swapchain->vkSwapchain);
+#endif
+    swapchain->imageGeneration.reset();
+    swapchain->swapchainImages.clear();
+    swapchain->vkSwapchain = VK_NULL_HANDLE;
+    swapchain->createInfo.oldSwapchain = VK_NULL_HANDLE;
+    swapchain->surfaceOwner.reset();
+    swapchain->vkSurface = VK_NULL_HANDLE;
+    swapchain->surfaceRetirementPending = false;
+    swapchain->wsi.setSurfaceAvailable(false);
+    swapchain->curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
+    return _gpuDevice->deviceLost ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
+}
+
+VkResult CCVKDevice::retireDeferredSwapchains() {
+    for (auto it = _gpuDevice->deferredSwapchains.begin(); it != _gpuDevice->deferredSwapchains.end();) {
+        const VkResult result = retireSwapchain(it->get());
+        if (!wsiTeardownSafe(result)) return result;
+        _gpuDevice->swapchains.erase(it->get());
+        it = _gpuDevice->deferredSwapchains.erase(it);
+    }
+    // Surface-only teardown retains its public facade. Retry it from either
+    // acquire or present as well, including failures after the image drain.
+    for (auto *swapchain : _gpuDevice->swapchains) {
+        if (!swapchain->surfaceRetirementPending) continue;
+        const VkResult result = retireSwapchain(swapchain);
+        if (!wsiTeardownSafe(result)) return result;
+    }
+    return _gpuDevice->deviceLost ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
 }
 
 void CCVKDevice::prepareWSISubmit(CCVKGPUQueue *queue) {
@@ -1040,7 +1196,8 @@ void CCVKDevice::prepareWSISubmit(CCVKGPUQueue *queue) {
     // A previous submit consumed the batch's late PRESENT transitions. Each
     // further actual submit needs a new matching pair, including independent
     // A/B draws after an abort. Keep both transitions in that existing submit.
-    ccstd::vector<VkImageMemoryBarrier> restore, finish;
+    ccstd::vector<VkImageMemoryBarrier> restore;
+    ccstd::vector<VkImageMemoryBarrier> finish;
     for (const auto *swapchain : queue->acquiredSwapchains) {
         restore.push_back(acquireBarrier);
         finish.push_back(presentBarrier);
@@ -1060,7 +1217,16 @@ void CCVKDevice::prepareWSISubmit(CCVKGPUQueue *queue) {
 void CCVKDevice::acquire(Swapchain *const *swapchains, uint32_t count) {
     // A repeated acquire is an abandoned prior frame, not permission to drop
     // its semaphore waits or leave images owned by the application.
-    while (!gpuSwapchains.empty()) abortAcquiredSwapchain(gpuSwapchains.back());
+    while (!gpuSwapchains.empty()) {
+        const auto pending = std::find_if(gpuSwapchains.begin(), gpuSwapchains.end(), [](const auto *swapchain) { return swapchain->abortPending; });
+        auto *swapchain = pending == gpuSwapchains.end() ? gpuSwapchains.back() : *pending;
+        const VkResult result = abortAcquiredSwapchain(swapchain);
+        if (result != VK_SUCCESS) {
+            CC_LOG_ERROR("Vulkan acquire deferred: previous image drain returned %d", result);
+            return;
+        }
+    }
+    if (retireDeferredSwapchains() != VK_SUCCESS) return;
     if (_onAcquire) _onAcquire->execute();
 
     auto *queue = static_cast<CCVKQueue *>(_queue);
@@ -1076,7 +1242,7 @@ void CCVKDevice::acquire(Swapchain *const *swapchains, uint32_t count) {
     for (uint32_t i = 0U; i < count; ++i) {
         auto *swapchain = static_cast<CCVKSwapchain *>(swapchains[i]);
         auto *gpuSwapchain = swapchain->gpuSwapchain();
-        if (!gpuSwapchain) continue;
+        if (!gpuSwapchain || gpuSwapchain->retiring || _gpuDevice->deviceLost) continue;
         if (gpuSwapchain->runtimeOwnedImages) {
             // XR owns its images/acquire/release, never pair them with the
             // window-system VkSwapchain vectors.
@@ -1102,6 +1268,7 @@ void CCVKDevice::acquire(Swapchain *const *swapchains, uint32_t count) {
         const VkResult res = vkAcquireNextImageKHR(_gpuDevice->vkDevice, gpuSwapchain->vkSwapchain, ~0ULL,
                                                  acquireSemaphore, VK_NULL_HANDLE, &imageIndex);
         if (!gpuSwapchain->wsi.completeAcquire(res, imageIndex)) {
+            if (res == VK_ERROR_DEVICE_LOST) _gpuDevice->deviceLost = true;
             gpuSwapchain->lastPresentResult = res;
             if (gpuSwapchain->wsi.hasFatalError()) CC_LOG_ERROR("Vulkan acquire failed fatally: %d", gpuSwapchain->wsi.fatalResult());
             continue;
@@ -1120,9 +1287,20 @@ void CCVKDevice::acquire(Swapchain *const *swapchains, uint32_t count) {
         // image's present semaphore. A separate present fence protects host
         // reset/destruction when maintenance1 was actually enabled.
         if (!generation.presentFences.empty() && generation.presentPending[imageIndex]) {
-            const VkFence fence = generation.presentFences[imageIndex];
-            VK_CHECK(vkWaitForFences(_gpuDevice->vkDevice, 1, &fence, VK_TRUE, DEFAULT_TIMEOUT));
-            VK_CHECK(vkResetFences(_gpuDevice->vkDevice, 1, &fence));
+            VkFence fence = generation.presentFences[imageIndex];
+            const VkResult waited = vkWaitForFences(_gpuDevice->vkDevice, 1, &fence, VK_TRUE, DEFAULT_TIMEOUT);
+            if (waited != VK_SUCCESS) {
+                gpuSwapchain->abortPending = true;
+                if (waited == VK_ERROR_DEVICE_LOST) _gpuDevice->deviceLost = true;
+                CC_LOG_ERROR("Vulkan present fence reuse deferred: %d", waited);
+                break;
+            }
+            const VkResult reset = vkResetFences(_gpuDevice->vkDevice, 1, &fence);
+            if (reset != VK_SUCCESS) {
+                gpuSwapchain->abortPending = true;
+                if (reset == VK_ERROR_DEVICE_LOST) _gpuDevice->deviceLost = true;
+                break;
+            }
             generation.presentPending[imageIndex] = false;
         }
         if (_options.enableBarrierDeduce || !generation.imageInitialized[imageIndex]) {
@@ -1153,7 +1331,7 @@ void CCVKDevice::acquire(Swapchain *const *swapchains, uint32_t count) {
         _gpuTransportHub->checkIn(
             [&](const CCVKGPUCommandBuffer *gpuCommandBuffer) {
                 cmdPipelineBarrier(CCVKDevice::getInstance()->gpuDevice(), gpuCommandBuffer->vkCommandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                                     0, 0, nullptr, 0, nullptr, utils::toUint(vkSwapchains.size()), vkPresentBarriers.data());
+                                     0, 0, nullptr, 0, nullptr, utils::toUint(vkPresentBarriers.size()), vkPresentBarriers.data());
             },
             false, true);
         queue->gpuQueue()->wsiTransitionsQueued = true;
@@ -1178,6 +1356,10 @@ VulkanMeasurementPresentPolicy getVulkanMeasurementPresentPolicy() noexcept {
 }
 
 void CCVKDevice::present() {
+    // A failed abort retains its exact semaphore/point pairing. Never hand
+    // that batch to presentation or rotate/reset its frame slot.
+    if (!wsiTeardownSafe(retryPendingWSIAborts())) return;
+    if (retireDeferredSwapchains() != VK_SUCCESS || _gpuDevice->deviceLost) return;
     VulkanMeasurementScope measurement(VulkanMeasurementKind::Present, this);
     CC_PROFILE(CCVKDevicePresent);
     auto *queue = static_cast<CCVKQueue *>(_queue);
@@ -1193,7 +1375,8 @@ void CCVKDevice::present() {
     // Existing submitted frames do not get a second signal-only submit.
     if ((!vkSwapchains.empty() && !queue->gpuQueue()->presentSemaphoresSignaled) ||
         !_gpuTransportHub->empty(false) || !_gpuTransportHub->empty(true)) {
-        queue->submit(nullptr, 0);
+        const VkResult result = queue->submitChecked(nullptr, 0);
+        if (result != VK_SUCCESS) return;
     }
 
 #if CC_SWAPPY_ENABLED
@@ -1228,6 +1411,7 @@ void CCVKDevice::present() {
 
         // Window-system images are released independently of the XR runtime.
         VkResult res = vkCCPresentFunc(queue->gpuQueue()->vkQueue, &presentInfo);
+        if (res == VK_ERROR_DEVICE_LOST) _gpuDevice->deviceLost = true;
         for (size_t i = 0; i < gpuSwapchains.size(); ++i) {
             // OOM/device loss may fail to enqueue the entire operation; WSI
             // per-swapchain results otherwise supersede the aggregate result.
@@ -1261,16 +1445,27 @@ void CCVKDevice::present() {
 
     uint32_t fenceCount = gpuFencePool()->size();
     if (fenceCount) {
-        VK_CHECK(vkWaitForFences(_gpuDevice->vkDevice, fenceCount,
-                                 gpuFencePool()->data(), VK_TRUE, DEFAULT_TIMEOUT));
+        const VkResult result = vkWaitForFences(_gpuDevice->vkDevice, fenceCount,
+                                                gpuFencePool()->data(), VK_TRUE, DEFAULT_TIMEOUT);
+        if (result != VK_SUCCESS) {
+            if (result == VK_ERROR_DEVICE_LOST) _gpuDevice->deviceLost = true;
+            return;
+        }
     }
 
-    VK_CHECK(_gpuDevice->observeCompletedFences(gpuFencePool()->data(), fenceCount));
+    const VkResult observed = _gpuDevice->observeCompletedFences(gpuFencePool()->data(), fenceCount);
+    if (observed != VK_SUCCESS) {
+        if (observed == VK_ERROR_DEVICE_LOST) _gpuDevice->deviceLost = true;
+        return;
+    }
     // Bulk fence observation covers ordinary submissions from this slot.
     // Cross-slot buffer-instance points must be waited with either backend.
     const auto slotResult = _gpuDevice->waitSlot(_gpuDevice->curBackBufferIndex, DEFAULT_TIMEOUT);
-    VK_CHECK(slotResult);
-    if (slotResult != VK_SUCCESS) return;
+    if (slotResult != VK_SUCCESS) {
+        if (slotResult == VK_ERROR_DEVICE_LOST) _gpuDevice->deviceLost = true;
+        CC_LOG_ERROR("Vulkan frame-slot retirement deferred: %d", slotResult);
+        return;
+    }
     if (!_gpuDevice->slotComplete(_gpuDevice->curBackBufferIndex)) {
         CC_LOG_ERROR("Vulkan slot retirement rejected: GPU completion is not proven.");
         return;
@@ -1304,41 +1499,35 @@ CCVKGPURecycleBin *CCVKDevice::gpuRecycleBin() { return _gpuRecycleBins[_gpuDevi
 CCVKGPUStagingBufferPool *CCVKDevice::gpuStagingBufferPool() { return _gpuStagingBufferPools[_gpuDevice->curBackBufferIndex].get(); }
 CCVKGPUSemaphorePool *CCVKDevice::gpuSemaphorePool() const { return _gpuSemaphorePools[_gpuDevice->curBackBufferIndex].get(); }
 
-void CCVKDevice::waitAllFences() {
-    if (!_gpuDevice || !_gpuDevice->vkDevice) return;
-    if (_gpuDevice->runtimePaths.useTimelineSemaphore) {
-        for (auto &entry : _gpuDevice->completionTrackers) {
-            const auto value = entry.second->submittedValue();
-            if (!value) continue;
-            const auto result = entry.second->wait({entry.second->domain(), value}, DEFAULT_TIMEOUT);
-            VK_CHECK(result);
-            if (result != VK_SUCCESS) return;
-        }
-        _gpuDevice->retireRecordings();
-        return;
-    }
-    static ccstd::vector<VkFence> fences;
-    fences.clear();
-
-    for (auto &fencePool : _gpuFencePools) {
-        fences.insert(fences.end(), fencePool->data(), fencePool->data() + fencePool->size());
-    }
-
-    if (!fences.empty()) {
-        VK_CHECK(vkWaitForFences(_gpuDevice->vkDevice, utils::toUint(fences.size()), fences.data(), VK_TRUE, DEFAULT_TIMEOUT));
-
-        VK_CHECK(_gpuDevice->observeCompletedFences(fences.data(), utils::toUint(fences.size())));
-        for (uint32_t slot = 0; slot < _gpuFencePools.size(); ++slot) {
-            if (!_gpuDevice->slotComplete(slot)) {
-                CC_LOG_ERROR("Vulkan fence reset rejected: GPU completion is not proven.");
-                return;
+VkResult CCVKDevice::waitAllFences(uint64_t timeout) {
+    if (!_gpuDevice || !_gpuDevice->vkDevice) return VK_SUCCESS;
+    const auto waitLostDeviceIdle = [this]() -> VkResult {
+        const VkResult result = vkDeviceWaitIdle(_gpuDevice->vkDevice);
+        if (!wsiTeardownSafe(result)) return result;
+        for (VkSemaphore semaphore : _gpuDevice->lostSubmissionSemaphores) vkDestroySemaphore(_gpuDevice->vkDevice, semaphore, nullptr);
+        _gpuDevice->lostSubmissionSemaphores.clear();
+        return VK_ERROR_DEVICE_LOST;
+    };
+    if (_gpuDevice->deviceLost) return waitLostDeviceIdle();
+    for (auto &entry : _gpuDevice->completionTrackers) {
+        const auto value = entry.second->submittedValue();
+        if (!value) continue;
+        const VkResult result = entry.second->wait({entry.second->domain(), value}, timeout);
+        if (result != VK_SUCCESS) {
+            if (result == VK_ERROR_DEVICE_LOST) {
+                _gpuDevice->deviceLost = true;
+                return waitLostDeviceIdle();
             }
+            return result;
         }
-        for (auto &fencePool : _gpuFencePools) {
-            fencePool->reset();
-        }
+    }
+    // Every successful actual submit is tracked, including transport. Only
+    // now can pools reset; a failed submit's unsignaled fence is not in use.
+    if (!_gpuDevice->runtimePaths.useTimelineSemaphore) {
+        for (auto &fencePool : _gpuFencePools) fencePool->reset();
     }
     _gpuDevice->retireRecordings();
+    return VK_SUCCESS;
 }
 
 void CCVKDevice::updateBackBufferCount(uint32_t backBufferCount) {
@@ -1532,7 +1721,7 @@ void CCVKDevice::copyTextureToBuffers(Texture *srcTexture, uint8_t *const *buffe
     IntrusivePtr<CCVKGPUBufferView> stagingBuffer = gpuStagingBufferPool()->alloc(totalSize, texelSize);
 
     // make sure the src texture is up-to-date
-    waitAllFences();
+    if (waitAllFences() != VK_SUCCESS) return;
 
     _gpuTransportHub->checkIn(
         [&](CCVKGPUCommandBuffer *cmdBuffer) {

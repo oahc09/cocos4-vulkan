@@ -3,6 +3,6 @@
         "type": "github",
         "owner": "oahc09",
         "name": "cocos-engine-external",
-        "checkout": "cocos-engine-external-v4"
+        "checkout": "a901f1a147452b6a1f0df11e35c1d8d24f227984"
     }
 }

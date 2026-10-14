@@ -104,9 +104,10 @@ jobs:
 
     - name: Download external libraries
       run: |
-        EXT_VERSION=`grep checkout native/external-config.json | awk -F'"' '{print $4}'`
+        EXT_VERSION=`node ./.github/workflows/get-native-external-version.js`
+        EXT_REPOSITORY=`node ./.github/workflows/get-native-external-version.js --url`
         echo "EXT_VERSION: ${EXT_VERSION}"
-        git clone --branch $EXT_VERSION --depth 1 https://github.com/cocos/cocos-engine-external native/external
+        node native/utils/checkout-deps.js "$EXT_REPOSITORY" "$EXT_VERSION" native/external
 
     - name: Install Cocos Engine
       run: |
