@@ -38,7 +38,8 @@ jobs:
         shell: bash
         run: |
           EXT_VERSION=`node ../.github/workflows/get-native-external-version.js`
-          git clone --branch $EXT_VERSION --depth 1 https://github.com/cocos/cocos-engine-external external
+          EXT_REPOSITORY=`node ../.github/workflows/get-native-external-version.js --url`
+          git clone --branch "$EXT_VERSION" --depth 1 "$EXT_REPOSITORY" external
 
       - name: Run Unit Tests
         shell: bash
@@ -74,7 +75,8 @@ jobs:
         shell: bash
         run: |
           EXT_VERSION=`node ../.github/workflows/get-native-external-version.js`
-          git clone --branch $EXT_VERSION --depth 1 https://github.com/cocos/cocos-engine-external external
+          EXT_REPOSITORY=`node ../.github/workflows/get-native-external-version.js --url`
+          git clone --branch "$EXT_VERSION" --depth 1 "$EXT_REPOSITORY" external
 
       - name: Generate bindings
         run: |
@@ -113,7 +115,8 @@ jobs:
   #       shell: bash
   #       run: |
   #         EXT_VERSION=`node ./.github/workflows/get-native-external-version.js`
-  #         git clone --branch $EXT_VERSION --depth 1 https://github.com/cocos/cocos-engine-external native/external
+  #         EXT_REPOSITORY=`node ./.github/workflows/get-native-external-version.js --url`
+  #         git clone --branch "$EXT_VERSION" --depth 1 "$EXT_REPOSITORY" native/external
   #     - name: Generate bindings
   #       run: |
           # cd ./native/tools/swig-config

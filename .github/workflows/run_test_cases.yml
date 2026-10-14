@@ -97,10 +97,11 @@ jobs:
         run: |
           set -x
           EXT_VERSION=`node ./.github/workflows/get-native-external-version.js`
+          EXT_REPOSITORY=`node ./.github/workflows/get-native-external-version.js --url`
           PRECLONE_EXTERNAL="E:/preclone/cocos-engine-external"
           if [ ! -d $PRECLONE_EXTERNAL ]; then
               mkdir -p $PRECLONE_EXTERNAL
-              git clone https://github.com/cocos/cocos-engine-external $PRECLONE_EXTERNAL
+              git clone "$EXT_REPOSITORY" "$PRECLONE_EXTERNAL"
           else
               echo "directory $PRECLONE_EXTERNAL is ready"
           fi
@@ -108,8 +109,9 @@ jobs:
               mkdir native/external
           fi
           git -C $PRECLONE_EXTERNAL reset --hard
-          git -C $PRECLONE_EXTERNAL fetch --all --prune
-          git -C $PRECLONE_EXTERNAL archive --format=tar $EXT_VERSION | tar -C native/external -xf -
+          git -C "$PRECLONE_EXTERNAL" remote set-url origin "$EXT_REPOSITORY"
+          git -C "$PRECLONE_EXTERNAL" fetch --prune origin "$EXT_VERSION"
+          git -C "$PRECLONE_EXTERNAL" archive --format=tar FETCH_HEAD | tar -C native/external -xf -
       
       - name: Generate bindings
         run: |
@@ -252,13 +254,14 @@ jobs:
         run: |
           set -x
           EXT_VERSION=`node ./.github/workflows/get-native-external-version.js`
+          EXT_REPOSITORY=`node ./.github/workflows/get-native-external-version.js --url`
           PRECLONE_EXTERNAL="/Users/admin/Documents/actions-runner/preclone/cocos-engine-external"
           if [ ! -d $PRECLONE_EXTERNAL ]; then
               echo "create directory $PRECLONE_EXTERNAL"
               # remove all sub-folders
               rm -rf /Users/admin/Documents/actions-runner/preclone
               mkdir -p $PRECLONE_EXTERNAL
-              git clone https://github.com/cocos/cocos-engine-external $PRECLONE_EXTERNAL
+              git clone "$EXT_REPOSITORY" "$PRECLONE_EXTERNAL"
           else
               echo "directory $PRECLONE_EXTERNAL is ready"
           fi
@@ -266,8 +269,9 @@ jobs:
               mkdir native/external
           fi
           git -C $PRECLONE_EXTERNAL reset --hard
-          git -C $PRECLONE_EXTERNAL fetch --all --prune
-          git -C $PRECLONE_EXTERNAL archive --format=tar $EXT_VERSION | tar -C native/external -xf -
+          git -C "$PRECLONE_EXTERNAL" remote set-url origin "$EXT_REPOSITORY"
+          git -C "$PRECLONE_EXTERNAL" fetch --prune origin "$EXT_VERSION"
+          git -C "$PRECLONE_EXTERNAL" archive --format=tar FETCH_HEAD | tar -C native/external -xf -
       
       - name: Generate bindings
         run: |
@@ -426,10 +430,11 @@ jobs:
         run: |
           set -x
           EXT_VERSION=`node ./.github/workflows/get-native-external-version.js`
+          EXT_REPOSITORY=`node ./.github/workflows/get-native-external-version.js --url`
           PRECLONE_EXTERNAL="E:/preclone/cocos-engine-external"
           if [ ! -d $PRECLONE_EXTERNAL ]; then
               mkdir -p $PRECLONE_EXTERNAL
-              git clone https://github.com/cocos/cocos-engine-external $PRECLONE_EXTERNAL
+              git clone "$EXT_REPOSITORY" "$PRECLONE_EXTERNAL"
           else
               echo "directory $PRECLONE_EXTERNAL is ready"
           fi
@@ -437,8 +442,9 @@ jobs:
               mkdir native/external
           fi
           git -C $PRECLONE_EXTERNAL reset --hard
-          git -C $PRECLONE_EXTERNAL fetch --all --prune
-          git -C $PRECLONE_EXTERNAL archive --format=tar $EXT_VERSION | tar -C native/external -xf -
+          git -C "$PRECLONE_EXTERNAL" remote set-url origin "$EXT_REPOSITORY"
+          git -C "$PRECLONE_EXTERNAL" fetch --prune origin "$EXT_VERSION"
+          git -C "$PRECLONE_EXTERNAL" archive --format=tar FETCH_HEAD | tar -C native/external -xf -
       
       - name: Generate bindings
         run: |
@@ -580,13 +586,14 @@ jobs:
         run: |
           set -x
           EXT_VERSION=`node ./.github/workflows/get-native-external-version.js`
+          EXT_REPOSITORY=`node ./.github/workflows/get-native-external-version.js --url`
           PRECLONE_EXTERNAL="/Users/admin/Documents/actions-runner/preclone/cocos-engine-external"
           if [ ! -d $PRECLONE_EXTERNAL ]; then
               echo "create directory $PRECLONE_EXTERNAL"
               # remove all sub-folders
               rm -rf /Users/admin/Documents/actions-runner/preclone
               mkdir -p $PRECLONE_EXTERNAL
-              git clone https://github.com/cocos/cocos-engine-external $PRECLONE_EXTERNAL
+              git clone "$EXT_REPOSITORY" "$PRECLONE_EXTERNAL"
           else
               echo "directory $PRECLONE_EXTERNAL is ready"
           fi
@@ -594,8 +601,9 @@ jobs:
               mkdir native/external
           fi
           git -C $PRECLONE_EXTERNAL reset --hard
-          git -C $PRECLONE_EXTERNAL fetch --all --prune
-          git -C $PRECLONE_EXTERNAL archive --format=tar $EXT_VERSION | tar -C native/external -xf -
+          git -C "$PRECLONE_EXTERNAL" remote set-url origin "$EXT_REPOSITORY"
+          git -C "$PRECLONE_EXTERNAL" fetch --prune origin "$EXT_VERSION"
+          git -C "$PRECLONE_EXTERNAL" archive --format=tar FETCH_HEAD | tar -C native/external -xf -
       
       - name: Generate bindings
         run: |

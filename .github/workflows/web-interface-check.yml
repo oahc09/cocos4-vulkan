@@ -99,11 +99,14 @@ jobs:
 
       - run: |
           echo "EXT_VERSION=$(node .github/workflows/get-native-external-version.js)" >> $GITHUB_ENV
+          # The base matrix checks out an older helper which has no --repository.
+          # Read that checkout's config directly, preserving its own dependency.
+          echo "EXT_REPOSITORY=$(node -p "const {from}=require('./native/external-config.json'); from.owner + '/' + from.name")" >> $GITHUB_ENV
 
       - uses: actions/checkout@v4
         name: Download external
         with:
-          repository: cocos/cocos-engine-external
+          repository: ${{ env.EXT_REPOSITORY }}
           path: './native/external'
           ref: "${{ env.EXT_VERSION }}"
           fetch-depth: 1
