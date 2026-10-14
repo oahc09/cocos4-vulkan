@@ -27,6 +27,7 @@
 #include <cstring>
 #include <memory>
 #include "VKStd.h"
+#include "VKWSILifetime.h"
 #include "gfx-base/GFXDevice.h"
 
 namespace cc {
@@ -117,8 +118,12 @@ public:
     CCVKGPURecycleBin *gpuRecycleBin();
     CCVKGPUStagingBufferPool *gpuStagingBufferPool();
     VulkanCompletionObjectCounts completionObjectCounts() const;
-    void waitAllFences();
-    void abortAcquiredSwapchain(CCVKGPUSwapchain *swapchain);
+    VkResult waitAllFences(uint64_t timeout = VULKAN_WSI_TIMEOUT);
+    VkResult abortAcquiredSwapchain(CCVKGPUSwapchain *swapchain, uint64_t timeout = VULKAN_WSI_TIMEOUT);
+    VkResult retireSwapchain(CCVKGPUSwapchain *swapchain, uint64_t timeout = VULKAN_WSI_TIMEOUT);
+    VkResult retireDeferredSwapchains();
+    bool hasPendingWSIAbort() const;
+    VkResult retryPendingWSIAborts();
     void prepareWSISubmit(CCVKGPUQueue *queue);
 
     void updateBackBufferCount(uint32_t backBufferCount);

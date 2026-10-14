@@ -56,7 +56,7 @@ protected:
 
     Format selectSurfaceConfig();
     void createVkSurface();
-    void destroySwapchain(CCVKGPUDevice *gpuDevice);
+    VkResult destroySwapchain(CCVKGPUDevice *gpuDevice);
 
     IntrusivePtr<CCVKGPUSwapchain> _gpuSwapchain;
     IXRInterface *_xr = nullptr;

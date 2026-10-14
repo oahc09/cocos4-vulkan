@@ -1,0 +1,520 @@
+// Test-only engine seams; every method under test is extracted unchanged from
+// production, apart from CRLF normalization. The real completion tracker and
+// WSI state are included. This is CPU fault injection, not a WSI driver test.
+#include <vulkan/vulkan_core.h>
+#include "VKCompletionTracker.h"
+#include "VKWSIState.h"
+#include "VKWSILifetime.h"
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <queue>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+#include <string_view>
+using namespace cc::gfx;
+namespace ccstd = std;
+#define CC_LOG_ERROR(...) ((void)0)
+#define CC_SWAPPY_ENABLED 0
+#define BARRIER_DEDUCTION_LEVEL 0
+#define BARRIER_DEDUCTION_LEVEL_BASIC 1
+#define DEFAULT_TIMEOUT 10000000000ULL
+#define CHECK(condition) do { if (!(condition)) { std::fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #condition); std::exit(1); } } while (0)
+#define VK_CHECK(expression) expression // CC_DEBUG=0: failures must be explicit.
+
+static VkResult submitResult, waitResult, idleResult, releaseResult, createResult, resetResult;
+static int fenceResets, acquireCallbacks;
+static uint64_t lastWaitTimeout;
+static std::vector<const char *> driverEvents;
+static int submits, waits, releases, destroyedSemaphores, destroyedFences, destroyedChains, resets, prepares, idleWaits;
+static uintptr_t nextHandle = 100;
+template<class T> T handle() { return (T)++nextHandle; }
+static VkFence lastWaitFence;
+static std::vector<VkResult> waitScript;
+static int timelineWaits = 0;
+static VKAPI_ATTR VkResult VKAPI_CALL fakeSubmit(VkQueue, uint32_t, const VkSubmitInfo *, VkFence) { ++submits; driverEvents.push_back("submit"); return submitResult; }
+static VKAPI_ATTR VkResult VKAPI_CALL fakeStatus(VkDevice, VkFence) { return VK_NOT_READY; }
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(VkDevice, uint32_t, const VkFence *fences, VkBool32, uint64_t timeout) {
+    CHECK(timeout == DEFAULT_TIMEOUT || timeout == UINT64_MAX); ++waits; lastWaitTimeout = timeout; lastWaitFence = *fences;
+    if (!waitScript.empty()) { const VkResult result = waitScript.front(); waitScript.erase(waitScript.begin()); return result; }
+    return waitResult;
+}
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkDeviceWaitIdle(VkDevice) { ++idleWaits; driverEvents.push_back("idle"); return idleResult; }
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateFence(VkDevice, const VkFenceCreateInfo *, const VkAllocationCallbacks *, VkFence *fence) { if (createResult == VK_SUCCESS) *fence = handle<VkFence>(); return createResult; }
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateSemaphore(VkDevice, const VkSemaphoreCreateInfo *, const VkAllocationCallbacks *, VkSemaphore *semaphore) { if (createResult == VK_SUCCESS) *semaphore = handle<VkSemaphore>(); return createResult; }
+extern "C" VKAPI_ATTR void VKAPI_CALL vkDestroyFramebuffer(VkDevice, VkFramebuffer, const VkAllocationCallbacks *) {}
+extern "C" VKAPI_ATTR void VKAPI_CALL vkDestroyImageView(VkDevice, VkImageView, const VkAllocationCallbacks *) {}
+extern "C" VKAPI_ATTR void VKAPI_CALL vkDestroySemaphore(VkDevice, VkSemaphore, const VkAllocationCallbacks *) { ++destroyedSemaphores; driverEvents.push_back("destroy-semaphore"); }
+extern "C" VKAPI_ATTR void VKAPI_CALL vkDestroyFence(VkDevice, VkFence, const VkAllocationCallbacks *) { ++destroyedFences; driverEvents.push_back("destroy-fence"); }
+extern "C" VKAPI_ATTR void VKAPI_CALL vkDestroySwapchainKHR(VkDevice, VkSwapchainKHR, const VkAllocationCallbacks *) { ++destroyedChains; }
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkReleaseSwapchainImagesEXT(VkDevice, const VkReleaseSwapchainImagesInfoEXT *) { ++releases; return releaseResult; }
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(VkDevice, VkSwapchainKHR, uint64_t, VkSemaphore, VkFence, uint32_t *index) { *index = 0; return VK_SUCCESS; }
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkResetFences(VkDevice, uint32_t, const VkFence *) { ++fenceResets; return resetResult; }
+static PFN_vkQueueSubmit submitFn = fakeSubmit;
+static PFN_vkGetFenceStatus statusFn = fakeStatus;
+static PFN_vkWaitForFences waitFn = vkWaitForFences;
+
+// Minimal owning pointer preserves the production IntrusivePtr call shape.
+template<class T> struct Ptr : std::shared_ptr<T> {
+    using std::shared_ptr<T>::shared_ptr;
+    Ptr(std::nullptr_t = nullptr) {}
+    Ptr &operator=(std::nullptr_t) { this->reset(); return *this; }
+    operator T *() const { return this->get(); }
+};
+struct CCVKGPUWSIGeneration;
+struct CCVKGPUWSISurface {
+    VkResult retireGenerations(uint64_t timeout = VULKAN_WSI_TIMEOUT);
+    std::vector<std::weak_ptr<CCVKGPUWSIGeneration>> generations;
+};
+struct CCVKGPUWSIGeneration {
+    ~CCVKGPUWSIGeneration();
+    VkResult waitForPresentCompletion(uint64_t timeout = VULKAN_WSI_TIMEOUT); void releaseVulkanObjects();
+    VkDevice device = (VkDevice)1; VkSwapchainKHR swapchain = (VkSwapchainKHR)2;
+    std::shared_ptr<CCVKGPUWSISurface> surface;
+    std::vector<VkSemaphore> renderFinished;
+    std::vector<VkFence> presentFences;
+    std::vector<uint8_t> presentPending, imageAcquired, imageInitialized;
+    std::vector<uint64_t> acquireSerials;
+    std::unordered_set<VkFramebuffer> framebuffers;
+    std::unordered_set<VkImageView> imageViews;
+    bool retired = false;
+};
+struct CCVKGPUSwapchain {
+    VkSwapchainKHR vkSwapchain = (VkSwapchainKHR)2; VkSurfaceKHR vkSurface = (VkSurfaceKHR)3;
+    std::shared_ptr<CCVKGPUWSIGeneration> imageGeneration;
+    std::shared_ptr<CCVKGPUWSISurface> surfaceOwner;
+    std::vector<VkImage> swapchainImages;
+    VkSwapchainCreateInfoKHR createInfo{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+    VulkanWSIStatus wsi; uint32_t curImageIndex = 0;
+    bool abortPending = false, retiring = false, surfaceRetirementPending = false;
+    GpuCompletionPoint abortCompletion;
+    VkFence abortFence = VK_NULL_HANDLE;
+    VkResult lastPresentResult = VK_SUCCESS;
+    bool runtimeOwnedImages = false;
+    bool hasRenderableImage() const { return !abortPending && !retiring && curImageIndex < swapchainImages.size() && wsi.hasRenderableImage(); }
+};
+struct CCVKGPURecording {};
+struct CCVKCommandBuffer {
+    std::queue<VkCommandBuffer> _pendingQueue;
+    std::queue<int> _pendingWSIUsage;
+    std::queue<std::shared_ptr<CCVKGPURecording>> _pendingRecordings;
+    bool pendingWSIUsageValid() { return true; }
+    bool pendingRecordingValid() { return true; }
+    uint32_t _numDrawCalls = 0, _numInstances = 0, _numTriangles = 0;
+};
+using CommandBuffer = CCVKCommandBuffer;
+struct CCVKGPUQueue {
+    std::vector<VkSemaphore> lastSignaledSemaphores;
+    std::vector<CCVKGPUSwapchain *> acquiredSwapchains;
+    std::shared_ptr<GpuCompletionTracker> completionTracker;
+    std::vector<VkCommandBuffer> commandBuffers;
+    std::vector<VkPipelineStageFlags> submitStageMasks;
+    bool presentSemaphoresSignaled = true, wsiTransitionsQueued = false;
+    int discardedWSICommandBuffers = 0, discardedRecordingCommandBuffers = 0;
+};
+struct CCVKQueue {
+    std::unique_ptr<CCVKGPUQueue> _gpuQueue = std::make_unique<CCVKGPUQueue>();
+    CCVKGPUQueue *gpuQueue() { return _gpuQueue.get(); }
+    void submit(CommandBuffer *const *, uint32_t);
+    VkResult submitChecked(CommandBuffer *const *, uint32_t);
+    std::vector<VkCommandBuffer> _pendingEarlyCommands, _pendingLateCommands;
+    std::vector<std::shared_ptr<CCVKGPURecording>> _pendingEarlyRecordings, _pendingLateRecordings;
+    uint32_t _numDrawCalls = 0, _numInstances = 0, _numTriangles = 0;
+};
+struct CCVKGPUCommandBuffer { VkCommandBuffer vkCommandBuffer = (VkCommandBuffer)1; };
+struct Transport {
+    bool early = false, late = false;
+    template<class F> void checkIn(F record, bool = false, bool isLate = false) {
+        CCVKGPUCommandBuffer command; record(&command); (isLate ? late : early) = true;
+    }
+    bool empty(bool isLate) const { return isLate ? !late : !early; }
+    VkCommandBuffer packageForFlight(bool isLate, std::vector<std::shared_ptr<CCVKGPURecording>> &recordings) {
+        (isLate ? late : early) = false;
+        recordings.push_back(std::make_shared<CCVKGPURecording>());
+        return handle<VkCommandBuffer>();
+    }
+};
+struct FencePool {
+    VkFence alloc() { return handle<VkFence>(); }
+    void reset() { ++resets; }
+    void cancel(VkFence) { ++cancelled; }
+    int cancelled = 0;
+};
+struct RecycleBin { std::vector<VkSemaphore> semaphores; void collectSemaphore(VkSemaphore semaphore) { semaphores.push_back(semaphore); } };
+struct BufferHub { void flush(Transport *) {} };
+struct CCVKGPUDevice {
+    VkDevice vkDevice = (VkDevice)1;
+    bool deviceLost = false;
+    std::vector<VkSemaphore> lostSubmissionSemaphores;
+    struct Caps { struct Feature { bool enabled = true; } swapchainMaintenance1; } capabilities;
+    struct Paths { bool useTimelineSemaphore = false; } runtimePaths;
+    std::unordered_map<VkQueue, std::shared_ptr<GpuCompletionTracker>> completionTrackers;
+    std::vector<Ptr<CCVKGPUSwapchain>> deferredSwapchains;
+    std::unordered_set<CCVKGPUSwapchain *> swapchains;
+    VkResult submitTracked(CCVKGPUQueue *queue, const VulkanSubmitBatch &batch, VkFence fence, GpuCompletionPoint &point,
+                           const std::vector<std::shared_ptr<CCVKGPURecording>> & = {}) { return queue->completionTracker->submit(batch, fence, point); }
+    void retireRecordings() {}
+};
+struct CCVKSwapchain;
+using Swapchain = CCVKSwapchain;
+namespace xr { struct XRSwapchain { uint32_t swapchainImageIndex = 0; }; }
+struct XR { xr::XRSwapchain doGFXDeviceAcquire(int) { return {}; } };
+struct AcquireCallback { void execute() { ++acquireCallbacks; } };
+struct SemaphorePool { VkSemaphore alloc() { return handle<VkSemaphore>(); } };
+struct DescriptorHub { void flush() {} };
+namespace utils { template<class T> uint32_t toUint(T value) { return static_cast<uint32_t>(value); } }
+static void cmdPipelineBarrier(CCVKGPUDevice *, VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags,
+                              VkDependencyFlags, uint32_t, const void *, uint32_t, const void *, uint32_t, const VkImageMemoryBarrier *) {}
+struct CCVKDevice {
+    static CCVKDevice *current;
+    static CCVKDevice *getInstance() { return current; }
+    CCVKQueue *_queue; Transport *_gpuTransportHub; CCVKGPUDevice *_gpuDevice;
+    std::vector<std::shared_ptr<FencePool>> _gpuFencePools{std::make_shared<FencePool>()};
+    RecycleBin recycle; BufferHub bufferHub;
+    XR *_xr = nullptr; int _api = 0;
+    AcquireCallback callback; AcquireCallback *_onAcquire = &callback;
+    struct Options { bool enableBarrierDeduce = true; } _options;
+    SemaphorePool semaphorePool;
+    DescriptorHub descriptorHub; DescriptorHub *_gpuDescriptorSetHub = &descriptorHub;
+    SemaphorePool *gpuSemaphorePool() { return &semaphorePool; }
+    void acquire(Swapchain *const *, uint32_t);
+    CCVKGPUDevice *gpuDevice() { return _gpuDevice; }
+    Transport *gpuTransportHub() { return _gpuTransportHub; }
+    FencePool *gpuFencePool() { return _gpuFencePools[0].get(); }
+    RecycleBin *gpuRecycleBin() { return &recycle; }
+    BufferHub *gpuBufferHub() { return &bufferHub; }
+    void prepareWSISubmit(CCVKGPUQueue *) { ++prepares; }
+    bool hasPendingWSIAbort() const;
+    VkResult retryPendingWSIAborts();
+    VkResult waitAllFences(uint64_t timeout = VULKAN_WSI_TIMEOUT);
+    VkResult abortAcquiredSwapchain(CCVKGPUSwapchain *, uint64_t timeout = VULKAN_WSI_TIMEOUT);
+    VkResult retireSwapchain(CCVKGPUSwapchain *, uint64_t timeout = VULKAN_WSI_TIMEOUT);
+    VkResult retireDeferredSwapchains();
+};
+CCVKDevice *CCVKDevice::current = nullptr;
+struct CCVKSwapchain {
+    Ptr<CCVKGPUSwapchain> _gpuSwapchain;
+    std::shared_ptr<int> _depthStencilTexture, _colorTexture;
+    CCVKGPUSwapchain *gpuSwapchain() { return _gpuSwapchain; }
+    bool checkSwapchainStatus() { return true; } // resize is tested separately from acquisition
+    void doDestroy(); void doDestroySurface(); VkResult destroySwapchain(CCVKGPUDevice *);
+};
+static std::vector<CCVKGPUSwapchain *> gpuSwapchains;
+static std::vector<uint32_t> vkSwapchainIndices;
+static std::vector<VkSwapchainKHR> vkSwapchains;
+static std::vector<VkImageMemoryBarrier> vkAcquireBarriers, vkPresentBarriers;
+static VkImageMemoryBarrier acquireBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+static VkImageMemoryBarrier presentBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+
+// @PRODUCTION_METHODS@
+
+struct Fixture {
+    CCVKQueue queue; Transport transport; CCVKGPUDevice gpu;
+    CCVKDevice device{&queue, &transport, &gpu};
+    Ptr<CCVKGPUSwapchain> swapchain{new CCVKGPUSwapchain};
+    std::shared_ptr<CCVKGPUWSIGeneration> generation;
+    Fixture(bool rendered = true) {
+        submitResult = waitResult = idleResult = releaseResult = createResult = resetResult = VK_SUCCESS;
+        submits = waits = releases = destroyedSemaphores = destroyedFences = destroyedChains = resets = prepares = idleWaits = 0;
+        fenceResets = acquireCallbacks = 0;
+        driverEvents.clear();
+        gpuSwapchains.clear(); vkSwapchainIndices.clear(); vkSwapchains.clear();
+        CCVKDevice::current = &device;
+        GpuCompletionTracker::Functions functions;
+        functions.submit = &submitFn; functions.getFenceStatus = &statusFn; functions.waitForFences = &waitFn;
+        queue.gpuQueue()->completionTracker = std::make_shared<GpuCompletionTracker>((VkDevice)1, (VkQueue)2, functions);
+        gpu.completionTrackers[(VkQueue)2] = queue.gpuQueue()->completionTracker;
+        auto surface = std::make_shared<CCVKGPUWSISurface>();
+        generation = std::make_shared<CCVKGPUWSIGeneration>();
+        generation->surface = surface;
+        generation->renderFinished = {handle<VkSemaphore>()};
+        generation->presentFences = {handle<VkFence>()};
+        generation->presentPending = {false}; generation->imageAcquired = {true};
+        generation->imageInitialized = {false}; generation->acquireSerials = {1};
+        surface->generations.push_back(generation);
+        swapchain->surfaceOwner = surface; swapchain->imageGeneration = generation;
+        swapchain->swapchainImages = {handle<VkImage>()};
+        swapchain->wsi.setSurfaceAvailable(true); swapchain->wsi.setExtent(10, 10);
+        swapchain->wsi.onRecreated(1); CHECK(swapchain->wsi.beginAcquire()); CHECK(swapchain->wsi.completeAcquire(VK_SUCCESS, 0));
+        gpu.swapchains.insert(swapchain);
+        gpuSwapchains = {swapchain}; vkSwapchains = {swapchain->vkSwapchain}; vkSwapchainIndices = {0};
+        queue.gpuQueue()->acquiredSwapchains = {swapchain};
+        queue.gpuQueue()->lastSignaledSemaphores = {rendered ? generation->renderFinished[0] : handle<VkSemaphore>()};
+        queue.gpuQueue()->presentSemaphoresSignaled = rendered;
+        if (rendered) {
+            VulkanSubmitBatch batch; GpuCompletionPoint prior;
+            CHECK(queue.gpuQueue()->completionTracker->submit(batch, handle<VkFence>(), prior) == VK_SUCCESS);
+        }
+    }
+    ~Fixture() {
+        submitResult = waitResult = idleResult = releaseResult = createResult = resetResult = VK_SUCCESS;
+        if (gpu.deviceLost) idleResult = VK_ERROR_DEVICE_LOST;
+        CHECK(wsiTeardownSafe(device.retireSwapchain(swapchain)));
+        CHECK(wsiTeardownSafe(device.retireDeferredSwapchains()));
+        generation.reset();
+    }
+};
+
+static void abortFailure(VkResult failure, bool failSubmit) {
+    Fixture f;
+    if (failSubmit) submitResult = failure; else waitResult = failure;
+    const auto result = f.device.abortAcquiredSwapchain(f.swapchain);
+    CHECK(result == failure);
+    CHECK(releases == 0 && destroyedChains == 0 && destroyedSemaphores == 0);
+    CHECK(f.generation->imageAcquired[0] && gpuSwapchains.size() == 1 && f.swapchain->abortPending);
+    CHECK(f.queue.gpuQueue()->completionTracker->completedValue() == 0);
+    CHECK(failSubmit ? waits == 0 : waits == 1);
+    const int attempts = submits;
+    const auto point = f.swapchain->abortCompletion;
+    const VkFence fence = lastWaitFence;
+    f.queue.submit(nullptr, 0); CHECK(submits == attempts); // public rendering blocked
+    submitResult = waitResult = VK_SUCCESS;
+    CHECK(f.device.abortAcquiredSwapchain(f.swapchain) == VK_SUCCESS);
+    CHECK(releases == 1 && gpuSwapchains.empty() && !f.generation->imageAcquired[0]);
+    CHECK(submits == attempts + (failSubmit ? 1 : 0));
+    if (!failSubmit) { CHECK(lastWaitFence == fence); CHECK(point.value == f.queue.gpuQueue()->completionTracker->completedValue()); }
+    std::printf("PASS abort %s %d: retained then recovered without double binary wait\n", failSubmit ? "submit" : "wait", failure);
+}
+static void generationFailure(VkResult failure, bool core) {
+    Fixture f;
+    CHECK(f.device.abortAcquiredSwapchain(f.swapchain) == VK_SUCCESS);
+    if (core) f.generation->presentFences.clear(); else f.generation->presentPending[0] = true;
+    waitResult = idleResult = failure;
+    CHECK(f.swapchain->surfaceOwner->retireGenerations() == failure);
+    CHECK(!f.generation->retired && destroyedChains == 0);
+    if (!core) CHECK(f.generation->presentPending[0]);
+    waitResult = idleResult = VK_SUCCESS;
+    CHECK(f.swapchain->surfaceOwner->retireGenerations() == VK_SUCCESS);
+    CHECK(f.generation->retired && destroyedChains == 1);
+    std::printf("PASS generation %s %d: pending retained then destroyed once\n", core ? "core" : "fence", failure);
+}
+static void detachedDestroy() {
+    Fixture f;
+    CCVKSwapchain publicChain; publicChain._gpuSwapchain = f.swapchain;
+    waitResult = VK_TIMEOUT;
+    publicChain.doDestroy();
+    CHECK(!publicChain._gpuSwapchain && f.gpu.deferredSwapchains.size() == 1);
+    CHECK(destroyedChains == 0 && releases == 0 && f.generation->imageAcquired[0]);
+    const int attempts = submits;
+    waitResult = VK_SUCCESS;
+    CHECK(f.device.retryPendingWSIAborts() == VK_SUCCESS);
+    CHECK(f.device.retireDeferredSwapchains() == VK_SUCCESS);
+    CHECK(f.gpu.deferredSwapchains.empty() && destroyedChains == 1 && releases == 1);
+    CHECK(submits == attempts);
+    std::puts("PASS public destroy timeout: owning deferred queue drains and empties");
+}
+static void surfaceDestroy() {
+    Fixture f; CCVKSwapchain publicChain; publicChain._gpuSwapchain = f.swapchain;
+    waitResult = VK_ERROR_OUT_OF_HOST_MEMORY;
+    publicChain.doDestroySurface();
+    CHECK(f.swapchain->surfaceRetirementPending && f.swapchain->vkSurface && destroyedChains == 0);
+    waitResult = VK_SUCCESS;
+    CHECK(f.device.retryPendingWSIAborts() == VK_SUCCESS);
+    CHECK(f.device.retireDeferredSwapchains() == VK_SUCCESS);
+    CHECK(!f.swapchain->surfaceRetirementPending && !f.swapchain->vkSurface && destroyedChains == 1);
+    std::puts("PASS surface destroy wait failure: retains and recovers");
+}
+static void releaseFailure() {
+    Fixture f; releaseResult = VK_ERROR_SURFACE_LOST_KHR;
+    CHECK(f.device.abortAcquiredSwapchain(f.swapchain) == VK_SUCCESS);
+    CHECK(f.swapchain->wsi.needsSurfaceRecreate() && gpuSwapchains.empty());
+    CHECK(destroyedChains == 1 && releases == 1 && !f.swapchain->imageGeneration);
+    const int attempts = submits;
+    CHECK(f.device.abortAcquiredSwapchain(f.swapchain) == VK_SUCCESS);
+    CHECK(submits == attempts && releases == 1);
+    std::puts("PASS image release surface loss: retire chain, no futile release retry");
+}
+static void transportFailure() {
+    Fixture f(false); f.transport.early = f.transport.late = true;
+    submitResult = VK_ERROR_OUT_OF_HOST_MEMORY;
+    const auto originalWaits = f.queue.gpuQueue()->lastSignaledSemaphores;
+    CHECK(f.device.abortAcquiredSwapchain(f.swapchain) == VK_ERROR_OUT_OF_HOST_MEMORY);
+    CHECK(f.queue.gpuQueue()->lastSignaledSemaphores == originalWaits && releases == 0 && waits == 0);
+    CHECK(f.queue._pendingEarlyRecordings.size() == 1 && f.queue._pendingLateRecordings.size() == 1);
+    CHECK(f.device.gpuFencePool()->cancelled == 1);
+    submitResult = VK_SUCCESS;
+    CHECK(f.device.abortAcquiredSwapchain(f.swapchain) == VK_SUCCESS);
+    CHECK(f.queue._pendingEarlyRecordings.empty() && f.queue._pendingLateRecordings.empty());
+    CHECK(submits == 3 && releases == 1);
+    std::puts("PASS transport submit failure: retains engine recordings and acquisition wait");
+}
+static void replacementFailure() {
+    Fixture f; f.transport.early = true;
+    const auto old = f.generation->renderFinished[0];
+    submitResult = VK_ERROR_OUT_OF_HOST_MEMORY;
+    CHECK(f.device.abortAcquiredSwapchain(f.swapchain) == VK_ERROR_OUT_OF_HOST_MEMORY);
+    CHECK(f.generation->renderFinished[0] == old && f.queue.gpuQueue()->lastSignaledSemaphores[0] == old);
+    CHECK(f.device.recycle.semaphores.empty() && destroyedSemaphores == 1);
+    submitResult = VK_SUCCESS;
+    CHECK(f.device.abortAcquiredSwapchain(f.swapchain) == VK_SUCCESS);
+    CHECK(f.device.recycle.semaphores.size() == 1 && f.device.recycle.semaphores[0] == old);
+    std::puts("PASS replacement signal failure: rollback, no premature recycle");
+}
+static void lostDevice(bool failSubmit) {
+    Fixture f;
+    (failSubmit ? submitResult : waitResult) = VK_ERROR_DEVICE_LOST;
+    idleResult = VK_ERROR_DEVICE_LOST;
+    CHECK(f.device.abortAcquiredSwapchain(f.swapchain) == VK_ERROR_DEVICE_LOST);
+    CHECK(f.gpu.deviceLost && releases == 0 && idleWaits == 1 && gpuSwapchains.empty());
+    CHECK(f.queue.gpuQueue()->completionTracker->completedValue() == 0);
+    CHECK(f.device.retireSwapchain(f.swapchain) == VK_ERROR_DEVICE_LOST);
+    CHECK(destroyedChains == 1);
+    std::printf("PASS lost device during %s: legal teardown, no normal completion fabricated\n", failSubmit ? "submit" : "wait");
+}
+// Additional scenarios contributed by an independent control-flow review.
+static VKAPI_ATTR VkResult VKAPI_CALL timelineCounter(VkDevice,VkSemaphore,uint64_t *out){*out=0;return VK_SUCCESS;}
+static VKAPI_ATTR VkResult VKAPI_CALL timelineWait(VkDevice,const VkSemaphoreWaitInfo*,uint64_t){++timelineWaits;return waitResult;}
+static PFN_vkGetSemaphoreCounterValue counterFn=timelineCounter;
+static PFN_vkWaitSemaphores timelineFn=timelineWait;
+static void timelineRetry() {
+ Fixture f(false);
+ auto *q=f.queue.gpuQueue();
+ GpuCompletionTracker::Functions fns{&submitFn,&statusFn,&waitFn,&counterFn,&timelineFn};
+ q->completionTracker=std::make_shared<GpuCompletionTracker>((VkDevice)1,(VkQueue)2,fns);
+ CHECK(q->completionTracker->configureTimeline(handle<VkSemaphore>(),1024)==VK_SUCCESS);
+ f.gpu.completionTrackers[(VkQueue)2]=q->completionTracker;f.gpu.runtimePaths.useTimelineSemaphore=true;
+ timelineWaits=0;waitResult=VK_TIMEOUT;
+ CHECK(f.device.abortAcquiredSwapchain(f.swapchain)==VK_TIMEOUT);
+ CHECK(f.swapchain->abortCompletion.value==2 && q->completionTracker->completedValue()==0 && !f.swapchain->abortFence);
+ int before=submits;auto point=f.swapchain->abortCompletion;
+ waitResult=VK_SUCCESS;
+ CHECK(f.device.abortAcquiredSwapchain(f.swapchain)==VK_SUCCESS);
+ CHECK(submits==before && q->completionTracker->completedValue()==point.value && releases==1 && timelineWaits==2);
+ std::puts("PASS independent timeline drain timeout retries same point without new submit.");
+}
+static void partialGenerationRetry() {
+ Fixture f;CHECK(f.device.abortAcquiredSwapchain(f.swapchain)==VK_SUCCESS);
+ f.generation->presentFences={handle<VkFence>(),handle<VkFence>(),handle<VkFence>()};
+ f.generation->presentPending={1,1,1};waitScript={VK_SUCCESS,VK_TIMEOUT};
+ CHECK(f.swapchain->surfaceOwner->retireGenerations()==VK_TIMEOUT);
+ CHECK(f.generation->presentPending==std::vector<uint8_t>({0,1,1}));
+ CHECK(!f.generation->retired && destroyedChains==0);
+ int before=waits;CHECK(f.swapchain->surfaceOwner->retireGenerations()==VK_SUCCESS);
+ CHECK(waits==before+2 && destroyedChains==1);
+ std::puts("PASS independent partial-generation retry preserves only unfinished fences.");
+}
+static void twoWindows() {
+ Fixture f;
+ Ptr<CCVKGPUSwapchain> second{new CCVKGPUSwapchain};
+ auto generation=std::make_shared<CCVKGPUWSIGeneration>();auto surface=std::make_shared<CCVKGPUWSISurface>();
+ generation->surface=surface;generation->swapchain=handle<VkSwapchainKHR>();
+ generation->renderFinished={handle<VkSemaphore>()};generation->presentFences={handle<VkFence>()};generation->presentPending={0};generation->imageAcquired={1};
+ surface->generations.push_back(generation);
+ second->surfaceOwner=surface;second->imageGeneration=generation;second->vkSwapchain=generation->swapchain;second->swapchainImages={handle<VkImage>()};
+ second->wsi.setSurfaceAvailable(true);second->wsi.setExtent(10,10);second->wsi.onRecreated(1);CHECK(second->wsi.beginAcquire());CHECK(second->wsi.completeAcquire(VK_SUCCESS,0));
+ gpuSwapchains.push_back(second);vkSwapchains.push_back(second->vkSwapchain);vkSwapchainIndices.push_back(0);
+ f.queue.gpuQueue()->acquiredSwapchains.push_back(second);f.queue.gpuQueue()->lastSignaledSemaphores.push_back(generation->renderFinished[0]);f.gpu.swapchains.insert(second);
+ waitResult=VK_TIMEOUT;CHECK(f.device.abortAcquiredSwapchain(f.swapchain)==VK_TIMEOUT);int attempts=submits;
+ CHECK(f.device.abortAcquiredSwapchain(second)==VK_NOT_READY && submits==attempts);
+ waitResult=VK_SUCCESS;CHECK(f.device.abortAcquiredSwapchain(f.swapchain)==VK_SUCCESS && submits==attempts);
+ CHECK(gpuSwapchains.size()==1 && gpuSwapchains[0]==second.get() && f.queue.gpuQueue()->lastSignaledSemaphores[0]==generation->renderFinished[0]);
+ CHECK(f.device.abortAcquiredSwapchain(second)==VK_SUCCESS && gpuSwapchains.empty() && releases==2);
+ CHECK(f.device.retireSwapchain(second)==VK_SUCCESS);f.gpu.swapchains.erase(second);
+ std::puts("PASS independent two-window pending abort serializes and preserves array pairing.");
+}
+static void actualOwnerTransfer() {
+ Fixture f;CCVKSwapchain facade;facade._gpuSwapchain=f.swapchain;
+ std::weak_ptr<CCVKGPUSwapchain> weak=facade._gpuSwapchain;
+ waitResult=VK_TIMEOUT;facade.doDestroy();
+ // Remove the fixture's artificial owner; the device queue must be the sole owner.
+ auto keep=f.swapchain;f.swapchain=nullptr;keep.reset();CHECK(!weak.expired());
+ CHECK(f.gpu.deferredSwapchains.size()==1 && destroyedChains==0);
+ waitResult=VK_SUCCESS;CHECK(f.device.retireDeferredSwapchains()==VK_SUCCESS);
+ CHECK(weak.expired() && f.gpu.deferredSwapchains.empty() && f.gpu.swapchains.empty() && destroyedChains==1);
+ // Fixture cleanup safely treats this detached empty shell as an XR/no-acquire object.
+ f.swapchain=Ptr<CCVKGPUSwapchain>{new CCVKGPUSwapchain};f.swapchain->vkSwapchain=VK_NULL_HANDLE;
+ std::puts("PASS independent deferred queue is sole strong owner and releases on successful retry.");
+}
+
+
+static void repeatedAcquire() {
+    Fixture f;
+    waitResult = VK_TIMEOUT;
+    f.device.acquire(nullptr, 0);
+    CHECK(waits == 1 && releases == 0 && acquireCallbacks == 0 && f.swapchain->abortPending);
+    const int attempts = submits;
+    waitResult = VK_SUCCESS;
+    f.device.acquire(nullptr, 0);
+    CHECK(submits == attempts && releases == 1 && gpuSwapchains.empty() && acquireCallbacks == 1);
+    std::puts("PASS actual acquire loop exits on failed drain and retries same point");
+}
+static void presentFenceReuse(bool resetFails) {
+    Fixture f;
+    CHECK(f.device.abortAcquiredSwapchain(f.swapchain) == VK_SUCCESS);
+    f.generation->presentPending[0] = true;
+    const int releasesBefore = releases;
+    CCVKSwapchain facade; facade._gpuSwapchain = f.swapchain;
+    Swapchain *facades[] = {&facade};
+    (resetFails ? resetResult : waitResult) = resetFails ? VK_ERROR_OUT_OF_HOST_MEMORY : VK_TIMEOUT;
+    f.device.acquire(facades, 1);
+    CHECK(f.swapchain->abortPending && f.generation->presentPending[0]);
+    CHECK(releases == releasesBefore && gpuSwapchains.size() == 1);
+    CHECK(fenceResets == (resetFails ? 1 : 0));
+    const int attempts = submits;
+    f.queue.submit(nullptr, 0); CHECK(submits == attempts);
+    resetResult = waitResult = VK_SUCCESS;
+    f.device.acquire(nullptr, 0);
+    CHECK(gpuSwapchains.empty() && releases == releasesBefore + 1);
+    std::printf("PASS actual acquire present-fence %s failure: no unsafe reset/reuse\n", resetFails ? "reset" : "wait");
+}
+static void finalShutdownWait() {
+    Fixture f; f.generation->presentPending = {true};
+    CHECK(f.device.retireSwapchain(f.swapchain, UINT64_MAX) == VK_SUCCESS);
+    CHECK(lastWaitTimeout == UINT64_MAX && destroyedChains == 1);
+    std::puts("PASS final shutdown explicitly propagates blocking timeout to present fences");
+}
+static void lostPresentFences() {
+    Fixture f; CHECK(f.device.abortAcquiredSwapchain(f.swapchain) == VK_SUCCESS);
+    f.generation->presentFences = {handle<VkFence>(), handle<VkFence>(), handle<VkFence>()};
+    f.generation->presentPending = {1, 1, 1};
+    const int before = waits;
+    waitScript = {VK_ERROR_DEVICE_LOST, VK_TIMEOUT};
+    CHECK(f.swapchain->surfaceOwner->retireGenerations() == VK_TIMEOUT);
+    CHECK(destroyedChains == 0 && f.generation->presentPending == std::vector<uint8_t>({0, 1, 1}));
+    waitResult = VK_ERROR_DEVICE_LOST;
+    CHECK(f.swapchain->surfaceOwner->retireGenerations() == VK_ERROR_DEVICE_LOST);
+    CHECK(waits == before + 4 && destroyedChains == 1);
+    std::puts("PASS lost presentation still checks every pending fence before destruction");
+}
+
+
+static void lostSubmitOrder(bool transport, bool idleFails) {
+    Fixture f;
+    if (transport) f.transport.early = true;
+    submitResult = VK_ERROR_DEVICE_LOST;
+    idleResult = idleFails ? VK_ERROR_OUT_OF_HOST_MEMORY : VK_ERROR_DEVICE_LOST;
+    const VkResult result = f.device.abortAcquiredSwapchain(f.swapchain);
+    const auto idle = std::find(driverEvents.begin(), driverEvents.end(), std::string_view("idle"));
+    CHECK(idle != driverEvents.end());
+    for (auto it = driverEvents.begin(); it != idle; ++it) {
+        CHECK(std::string_view(*it) != "destroy-fence" && std::string_view(*it) != "destroy-semaphore");
+    }
+    CHECK(f.queue.gpuQueue()->completionTracker->completedValue() == 0);
+    if (idleFails) {
+        CHECK(result == VK_ERROR_OUT_OF_HOST_MEMORY && f.swapchain->abortPending);
+        CHECK(destroyedFences == 0 && destroyedSemaphores == 0 && releases == 0);
+        if (transport) CHECK(f.gpu.lostSubmissionSemaphores.size() == 1);
+        else CHECK(f.swapchain->abortFence != VK_NULL_HANDLE);
+        idleResult = VK_ERROR_DEVICE_LOST;
+        CHECK(f.device.abortAcquiredSwapchain(f.swapchain) == VK_ERROR_DEVICE_LOST);
+        CHECK(f.gpu.lostSubmissionSemaphores.empty() && !f.swapchain->abortFence);
+    } else {
+        CHECK(result == VK_ERROR_DEVICE_LOST && !f.swapchain->abortPending);
+    }
+    std::printf("PASS lost %s submit cleanup waits for idle proof%s\n", transport ? "transport" : "drain", idleFails ? "; failed idle retains owners" : "");
+}
+
+int main() {
+    for (VkResult result : {VK_TIMEOUT, VK_ERROR_OUT_OF_HOST_MEMORY, VK_ERROR_OUT_OF_DEVICE_MEMORY}) abortFailure(result, false);
+    for (VkResult result : {VK_ERROR_OUT_OF_HOST_MEMORY, VK_ERROR_OUT_OF_DEVICE_MEMORY}) abortFailure(result, true);
+    for (VkResult result : {VK_TIMEOUT, VK_ERROR_OUT_OF_HOST_MEMORY}) generationFailure(result, false);
+    generationFailure(VK_ERROR_OUT_OF_HOST_MEMORY, true);
+    detachedDestroy(); surfaceDestroy(); releaseFailure(); transportFailure(); replacementFailure();
+    lostDevice(false); lostDevice(true);
+    timelineRetry(); partialGenerationRetry(); twoWindows(); actualOwnerTransfer();
+    repeatedAcquire(); presentFenceReuse(false); presentFenceReuse(true); finalShutdownWait(); lostPresentFences();
+    for (bool transport : {false, true}) for (bool idleFails : {false, true}) lostSubmitOrder(transport, idleFails);
+    std::puts("28 production-control-flow failure/recovery scenarios passed (CC_DEBUG=0, NDEBUG).");
+}

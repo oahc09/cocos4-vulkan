@@ -25,6 +25,8 @@
 #pragma once
 
 #include <memory>
+#include <vector>
+#include <vulkan/vulkan_core.h>
 #include "VKStd.h"
 #include "gfx-base/GFXQueue.h"
 
@@ -32,6 +34,7 @@ namespace cc {
 namespace gfx {
 
 struct CCVKGPUQueue;
+struct CCVKGPURecording;
 
 class CC_VULKAN_API CCVKQueue final : public Queue {
 public:
@@ -44,6 +47,11 @@ public:
 
 protected:
     friend class CCVKDevice;
+
+    VkResult submitChecked(CommandBuffer *const *cmdBuffs, uint32_t count);
+    // Transport recordings must survive a failed submission for the retry.
+    ccstd::vector<VkCommandBuffer> _pendingEarlyCommands, _pendingLateCommands;
+    std::vector<std::shared_ptr<CCVKGPURecording>> _pendingEarlyRecordings, _pendingLateRecordings;
 
     void doInit(const QueueInfo &info) override;
     void doDestroy() override;

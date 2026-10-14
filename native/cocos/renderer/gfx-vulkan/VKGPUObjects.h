@@ -37,6 +37,7 @@
 #include "VKRenderPassSignatureAdapter.h"
 #include "VKShaderStageKey.h"
 #include "VKStd.h"
+#include "VKWSILifetime.h"
 #include "VKUtils.h"
 #include "VKWSIState.h"
 #include "base/Log.h"
@@ -185,7 +186,7 @@ struct CCVKGPUSwapchain;
 struct CCVKGPUWSIGeneration;
 struct CCVKGPUWSISurface {
     ~CCVKGPUWSISurface();
-    void retireGenerations();
+    VkResult retireGenerations(uint64_t timeout = VULKAN_WSI_TIMEOUT);
     VkInstance instance = VK_NULL_HANDLE;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     ccstd::vector<std::weak_ptr<CCVKGPUWSIGeneration>> generations;
@@ -196,7 +197,7 @@ struct CCVKGPUWSISurface {
 // ownership then determines when its Vulkan handles may actually be released.
 struct CCVKGPUWSIGeneration {
     ~CCVKGPUWSIGeneration();
-    void waitForPresentCompletion();
+    VkResult waitForPresentCompletion(uint64_t timeout = VULKAN_WSI_TIMEOUT);
     void releaseVulkanObjects();
     VkDevice device = VK_NULL_HANDLE;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
@@ -390,9 +391,15 @@ struct CCVKGPUSwapchain : public CCVKGPUDeviceObject {
     uint32_t curImageIndex = VulkanWSIStatus::INVALID_IMAGE_INDEX;
     VulkanWSIStatus wsi;
     bool runtimeOwnedImages = false;
+    // A timed-out drain keeps its exact point: its binary wait is single-use.
+    bool abortPending = false;
+    bool retiring = false;
+    bool surfaceRetirementPending = false;
+    GpuCompletionPoint abortCompletion;
+    VkFence abortFence = VK_NULL_HANDLE;
     uint32_t generation = 0;
     bool hasRenderableImage() const {
-        return curImageIndex < swapchainImages.size() &&
+        return !abortPending && !retiring && curImageIndex < swapchainImages.size() &&
                (runtimeOwnedImages || wsi.hasRenderableImage());
     }
     VkSwapchainKHR vkSwapchain = VK_NULL_HANDLE;
@@ -677,6 +684,13 @@ class CCVKGPUDescriptorSetPool;
 class CCVKGPUDevice final {
 public:
     VkDevice vkDevice{VK_NULL_HANDLE};
+    bool deviceLost = false;
+    // A failed lost-device idle wait must not discard possibly submitted
+    // replacement semaphores. The next proven lost-device idle reclaims them.
+    ccstd::vector<VkSemaphore> lostSubmissionSemaphores;
+    // Public swapchain destruction cannot return a VkResult. Transfer ownership
+    // here on a retryable failure; acquire/present and final teardown retry it.
+    ccstd::vector<IntrusivePtr<CCVKGPUSwapchain>> deferredSwapchains;
     ccstd::unordered_map<VkQueue, std::shared_ptr<GpuCompletionTracker>> completionTrackers;
     ccstd::unordered_map<VkQueue, VkSemaphore> completionSemaphores;
     uint64_t maxTimelineSemaphoreValueDifference{0};
@@ -765,6 +779,12 @@ public:
         _count++;
 
         return fence;
+    }
+
+    // The most recently allocated fence was never submitted. Keep it reusable
+    // but exclude it from the active frame-slot waits.
+    void cancel(VkFence fence) {
+        if (_count && _fences[_count - 1] == fence) --_count;
     }
 
     void reset() {
