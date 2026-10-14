@@ -3482,19 +3482,19 @@ endif()
 
 if(MSVC)
     set(V8_DIR
-        ${CWD}/external/win64/libs/v8
+        ${EXTERNAL_ROOT}/win64/libs/v8
     )
     file(GLOB V8_DLLS
-        ${CWD}/external/win64/libs/v8/Release/*.dll
+        ${EXTERNAL_ROOT}/win64/libs/v8/Release/*.dll
     )
 
     file(GLOB WINDOWS_DLLS
-        ${CWD}/external/win64/libs/*.dll
+        ${EXTERNAL_ROOT}/win64/libs/*.dll
     )
     # VC++/UCRT runtime DLLs must match the active toolchain: the legacy pinned
     # external/win64/libs/msvcr copies (14.29) crash newer-MSVC builds at startup
     # (std::mutex::lock in glslang::InitializeProcess).
-    include(${CWD}/external/win64/windows-runtime-libs.cmake)
+    include("${EXTERNAL_ROOT}/win64/windows-runtime-libs.cmake")
     cc_windows_collect_runtime_dlls(CC_WINDOWS_TOOLCHAIN_RUNTIME_DLLS)
     list(APPEND WINDOWS_DLLS ${CC_WINDOWS_TOOLCHAIN_RUNTIME_DLLS})
     target_compile_options(${ENGINE_NAME} PUBLIC /MP
